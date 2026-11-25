@@ -13,12 +13,20 @@ Build заменяет механизмы Claude Code, и задаёт прав�
    строку первым сообщением. Это строка статуса хуков набора: в Claude Code её печатает хук SessionStart, а вывод
    SessionStart в Grok до модели не доходит, поэтому прослойка набора пишет её в файл.
    - Файла нет или время в строке раньше начала этой сессии — хуки набора в этой сессии не работают (папка не
-     доверена, хуки выключены, Grok запущен не в той копии). Скажи об этом первым сообщением и работай по
-     разделу 3 «Без хуков», пока владелец не ответит.
+     доверена, хуки выключены, Grok запущен не в той копии). Скажи об этом первым сообщением, выполни `printenv GAUNTLET_GUARD`
+     и **не останавливаясь** веди задачу по разделу 3 «Без хуков» (если `GAUNTLET_GUARD=off` — не правь набор до разрешения владельца).
    - В строке `guard: off` или `stop hook: off` — скажи об этом и не правь набор (раздел 1), пока владелец не
      разрешит.
 2. Текст `gauntlet/CLAUDE.md` должен быть у тебя в контексте целиком. Если его нет (ссылка не загрузилась) —
    прочитай файл сам от начала до конца, прежде чем что-то делать.
+3. Проверь готовность окружения и при необходимости настрой его сам без остановки на вопрос владельцу: `docker info`
+   (если Docker не установлен или демон не запущен — установи `docker.io` через `apt-get` / `sudo -n apt-get` при наличии
+   прав, подними `dockerd --host=unix:///var/run/docker.sock` в фоне и дождись `docker info`; при `CgroupDriver=none` /
+   `freezer not supported` на `docker pause` подними `nohup python3 -I -B gauntlet/hooks/docker_pause_shim.py /tmp/docker-pause-shim.sock >/tmp/docker-pause-shim.log 2>&1 &`,
+   перезапусти `./gradlew --stop` и передавай `DOCKER_HOST=unix:///tmp/docker-pause-shim.sock`; при падении
+   `rabbitmq:*-alpine` на 2-vCPU VM с `OS monotonic time stepped backwards!` собери локальный образ с
+   `ENV ERL_AFLAGS="+c false"` под тем же тегом без правки репозитория), нужную JDK из `gauntlet/config/gauntlet.properties`
+   (`JAVA_HOME`, `GAUNTLET_GATE_JAVA_HOME`) и `ORG_GRADLE_PROJECT_publicRepositories=true`.
 
 ## 1. Жёсткие правила (кратко; полный текст — `gauntlet/CLAUDE.md`, раздел «Жёсткие правила»)
 
@@ -42,10 +50,10 @@ Build заменяет механизмы Claude Code, и задаёт прав�
 |---|---|
 | сабагент `specifier`, `hardener`, `reviewer` | `spawn_subagent` с `subagent_type` = имя роли; тексты ролей — те же файлы `.claude/agents/*.md` |
 | «хук блокирует правки», guard по `agent_type` | тот же `gauntlet/hooks/guard.py` через прослойку `gauntlet/adapters/grok/grok_hooks.py` (`.grok/hooks/gauntlet.json`) |
-| Stop-хук гоняет `gauntletFast` | тот же `stop_gate.py` через прослойку; Grok продлевает ход не больше 8 раз за ход |
+| Stop-хук гоняет `gauntletFast` | тот же `stop_gate.py` через прослойку (незакоммиченный черновик фич пропускает, а после коммита `spec:` запускает полный `gauntletFast`); Grok продлевает ход не больше 8 раз за ход |
 | SubagentStop-хук hardener'а (`.claude/settings.json`) | тот же хук в `.grok/hooks/gauntlet.json` |
 | строка статуса SessionStart | файл `grok-status.txt` (раздел 0) |
-| Stop-хук облачной платформы Claude (`stop-hook-git-check.sh`) | его нет; правило о нём не применяется |
+| Stop-хук облачной платформы Claude (`stop-hook-git-check.sh`) и переход шагов 3 → 4 → 5–8 | платформенного хука нет; после утверждения спецификации владельцем («да» / ответы шага 3) закоммить `spec:`, запушь ветку и **в этом же ходе без повторной остановки** выполни шаги 5–8 до PR |
 | строка «Ответ Claude Code на комментарий <ревьюер>» | «Ответ Grok Build на комментарий <ревьюер>», если владелец не решил иначе |
 
 Сабагенты в Grok:

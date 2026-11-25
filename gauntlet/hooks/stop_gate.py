@@ -10,12 +10,14 @@ An agent may not finish while the gauntlet is red.
 The gate runs only when the content of the working tree differs from what it was when the session
 started (the developer's pre-existing uncommitted work does not count, and committing it changes
 nothing) and that exact content has not been verified before - so questions and read-only turns cost
-nothing, and a red result is not re-run until something changes. A turn that changed nothing but the
-feature files never runs the gate: the specification waits for the human, not for the gauntlet. While
-uncommitted feature changes wait for the human's approval in the chat, the acceptance tests are left
-out of the run (the agent must be able to stop and ask), but every other check still runs. On red it
-exits 2 and feeds the failing lines back to the agent, which keeps working. After --max-attempts
-consecutive red stops it lets the agent stop and warns instead, so a session can never loop forever.
+nothing, and a red result is not re-run until something changes. A turn that changed nothing but
+uncommitted feature files never runs the gate: the draft specification waits for the human, not for the
+gauntlet; once the feature files are committed (`spec:`), the full gate runs so the session cannot stop
+right after freezing the spec without implementing it. While uncommitted feature changes wait for the
+human's approval in the chat, the acceptance tests are left out of the run (the agent must be able to
+stop and ask), but every other check still runs. On red it exits 2 and feeds the failing lines back to
+the agent, which keeps working. After --max-attempts consecutive red stops it lets the agent stop and
+warns instead, so a session can never loop forever.
 
 Humans can switch it off for a session:  GAUNTLET_STOP_HOOK=off (environment variable at start-up)
 Extra Gradle arguments (e.g. --offline):  GAUNTLET_GRADLE_ARGS="--offline"
@@ -25,6 +27,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import time
@@ -140,36 +143,36 @@ def gate(opts, event, state, session):
     if not changed:
         return 0
     features = features_dirs()
-    if all(any(("/" + p).startswith("/" + f + "/") for f in features) for p in changed):
-        return 0  # only the spec changed: it waits for the human's approval, not for the gauntlet
+    pending = specs_pending_approval(features)
+    if pending and all(any(("/" + p).startswith("/" + f + "/") for f in features) for p in changed):
+        return 0  # only an uncommitted spec draft changed: it waits for the human's approval, not for the gauntlet
     affected = affected_modules(changed)
     if not affected:
         return 0  # nothing inside a guarded build changed
-    pending = specs_pending_approval(features)
     excluded = SPEC_DEPENDENT_TASKS if pending else []
     key = session + "-" + safe(event.get("agent_id") or "main")
+    fingerprint = hashlib.sha256((opts.task + ("|pending" if pending else "") + "|".join(affected) + tree).encode()).hexdigest()
+    green_file = os.path.join(state, "last-green-" + safe(opts.task))
     # The last-stop mark (code tree without the spec | pending/approved | ok/red) remembers the state in
-    # which this agent was last allowed to stop. Same code since then = this turn changed only the spec
-    # (or nothing): the question to the human must not wait for Gradle. Exceptions: the last stop was green
-    # with the acceptance tests left out and the spec has been committed since (pending -> approved) - check
-    # now; the last stop released a RED result - remind the agent, and re-run when it ran Gradle itself since
+    # which this agent was last allowed to stop. Same code since then = this turn changed only an uncommitted
+    # spec draft (or nothing): the question to the human must not wait for Gradle. Once the spec is committed
+    # (not pending), any unverified tree - including a spec committed in a single turn - must run the gate;
+    # the last stop released a RED result - remind the agent, and re-run when it ran Gradle itself since
     # (newer test reports) unless a spec draft is waiting for the human, whose question goes first.
     code_tree = tree_fingerprint(exclude=features)
     state_tag = "pending" if pending else "approved"
     stop_mark = os.path.join(state, key + ".last-stop")
     last = read(stop_mark).split("|")
     if len(last) == 3 and last[0] == code_tree and not (last[1] == "pending" and not pending):
-        if last[2] == "ok":
+        if last[2] == "ok" and (pending or read(green_file) == fingerprint):
             write(stop_mark, f"{code_tree}|{state_tag}|ok")
             return 0
-        if pending or not newer_than(mtime(stop_mark), REPORT_DIRS):
+        if last[2] == "red" and (pending or not newer_than(mtime(stop_mark), REPORT_DIRS)):
             write(stop_mark, f"{code_tree}|{state_tag}|red")
             print(json.dumps({"systemMessage":
                               f"[gauntlet] reminder: {opts.task} was still RED when you were last allowed to stop and the "
                               f"code has not changed since. The work is NOT done - say so in your report."}))
             return 0
-    fingerprint = hashlib.sha256((opts.task + ("|pending" if pending else "") + "|".join(affected) + tree).encode()).hexdigest()
-    green_file = os.path.join(state, "last-green-" + safe(opts.task))
     if read(green_file) == fingerprint:
         write(stop_mark, f"{code_tree}|{state_tag}|ok")
         return 0
@@ -296,6 +299,13 @@ def gradle_env():
     env = dict(os.environ)
     if env.get("CLAUDE_CODE_REMOTE") == "true":
         env.setdefault("ORG_GRADLE_PROJECT_publicRepositories", "true")
+    shim_sock = env.get("GAUNTLET_DOCKER_SHIM_SOCK", "/tmp/docker-pause-shim.sock")
+    if not env.get("DOCKER_HOST") and shim_sock:
+        try:
+            if stat.S_ISSOCK(os.stat(shim_sock).st_mode):
+                env["DOCKER_HOST"] = f"unix://{shim_sock}"
+        except OSError:
+            pass
     return env
 
 

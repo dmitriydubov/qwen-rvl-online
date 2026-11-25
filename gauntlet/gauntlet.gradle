@@ -1391,6 +1391,14 @@ tasks.register('gherkinMutantsRun', Test) {
         // controls ran first, and a stand that wears out (a quota) failed the mutant instead: a kill.
         maxParallelForks = 1
         forkEvery = 0
+        // Every mutant and control runs in this single worker JVM (forkEvery = 0): Gradle's 512m default heap OOMs on
+        // a module with thousands of scenarios. gherkin.maxHeapSize overrides when set; else keep a project heap or 2g.
+        def configuredHeap = setting('gherkin.maxHeapSize', '')
+        if (configuredHeap) {
+            maxHeapSize = configuredHeap
+        } else if (!maxHeapSize) {
+            maxHeapSize = '2g'
+        }
         // an argument provider added at execution: the test JVM gets one -D per key, and a provider's beats the
         // project's jvmArgs and systemProperty, even ones its own doFirst sets after this one. The message stream
         // records what the run did with them (gherkinMutation judges the order by it).
