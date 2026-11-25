@@ -13,14 +13,23 @@ Qwen Code отличается от Claude Code. Где они расходят�
 
 ## 0. Начало сессии (сессия задачи и координатор)
 - Первым сообщением приведи строку статуса `[gauntlet] active - …` (её кладёт в контекст хук SessionStart).
-  Строки нет — хуки проекта не загружены: не одобрены (`/hooks`, диалог одобрения при старте), Qwen Code запущен не
-  из корня репозитория, включены `--safe-mode`, `--bare` или `disableAllHooks`. Тогда guard и stop-gate не работают:
-  скажи это владельцу и не меняй файлы, пока он не починит. В строке `guard: off` — правило набора: не трогай набор,
-  `.qwen/` и `QWEN.md`, пока владелец не разрешит.
+  Строки нет — хуки проекта не загружены (не одобрены в `/hooks`, IDE-клиент вроде Qoder Desktop не поддерживает хуки
+  Qwen Code, включены `--safe-mode`, `--bare` или `disableAllHooks`): скажи это первой строкой, выполни
+  `printenv GAUNTLET_GUARD` и **без остановки на вопрос** веди задачу по разделу 5 «Перед словом „готово“», держа охрану
+  путей и ролей сам. В строке `guard: off` (или `GAUNTLET_GUARD=off`) — не трогай набор, `.qwen/` и `QWEN.md`, пока
+  владелец не разрешит.
 - Назови модель и уровень рассуждений сессии (`/model`, `/effort`): ожидается `qwen4-max`, уровень выбрал владелец.
-- Локальная сессия: `printenv ORG_GRADLE_PROJECT_publicRepositories` должно дать `true`, иначе сборка пойдёт в
-  корпоративный реестр (gauntlet/CLAUDE.md, «Среда облачной сессии»). Docker поднимает владелец; строка статуса
-  показывает `docker: …`.
+- Окружение и Docker — проверь и настрой сам без остановки на вопрос человеку: `docker info` (если Docker не установлен
+  или демон не отвечает — проверь доступные рантаймы Docker Desktop / Colima / `dockerd`, при наличии прав в Linux
+  установи `docker.io` через `apt-get` / `sudo -n apt-get`, подними `dockerd --host=unix:///var/run/docker.sock` в фоне и
+  дождись `docker info`; при `CgroupDriver=none` / `freezer not supported` на `docker pause` подними
+  `nohup python3 -I -B gauntlet/hooks/docker_pause_shim.py /tmp/docker-pause-shim.sock >/tmp/docker-pause-shim.log 2>&1 &`,
+  перезапусти `./gradlew --stop` и передавай `DOCKER_HOST=unix:///tmp/docker-pause-shim.sock`; при падении
+  `rabbitmq:*-alpine` на 2-vCPU VM с `OS monotonic time stepped backwards!` собери локальный образ с
+  `ENV ERL_AFLAGS="+c false"` под тем же тегом без правки репозитория), найди или установи нужную JDK
+  (`project.java.version`, `gate.java.version` → задай `JAVA_HOME`, `GAUNTLET_GATE_JAVA_HOME`) и экспортируй
+  `ORG_GRADLE_PROJECT_publicRepositories=true` (иначе сборка пойдёт в корпоративный реестр). Обращайся к владельцу
+  только если среда физически не даёт ни прав установки, ни запуска демона.
 - Исключение: запуск карточки без интерактива (`qwen -p` с карточкой пред-проверки от координатора). Карточка только
   читает, её правила — в ней самой; этот раздел к ней не применяется.
 
@@ -28,10 +37,10 @@ Qwen Code отличается от Claude Code. Где они расходят�
 | В `gauntlet/CLAUDE.md` | В Qwen Code |
 |---|---|
 | человеческие пути `gauntlet/`, `.claude/`, `CLAUDE.md`, оба workflow, `CODEOWNERS`, `.git/` | те же и ещё `QWEN.md`, `AGENTS.md`, `.qwen/` (настройки, хуки, роли), `.qwenignore`, `.agentignore`, `.aiignore`, `~/.qwen/`, `~/.env` (Qwen Code берёт из него переменные при старте) и `/etc/qwen-code/`. Их закрывают хук `PreToolUse` (`gauntlet/adapters/qwen/qwen_hooks.py` → `guard.py`) и запреты `permissions.deny` в `.qwen/settings.json` |
-| Stop-хук `stop_gate.py` | тот же `stop_gate.py`, хук `Stop` в `.qwen/settings.json`: красный `gauntletFast` возвращает тебя к работе с его строками; после 3 попыток отпускает с предупреждением «work is NOT done» |
+| Stop-хук `stop_gate.py` | тот же `stop_gate.py`, хук `Stop` в `.qwen/settings.json` (незакоммиченный черновик фич пропускает, а после коммита `spec:` гоняет полный `gauntletFast`): красный `gauntletFast` возвращает тебя к работе с его строками; после 3 попыток отпускает с предупреждением «work is NOT done» |
 | SubagentStop-хук hardener'а (`mutationGate`) | тот же, `SubagentStop` с matcher `^hardener$` |
 | сабагенты `specifier`, `hardener`, `reviewer` | агенты `.qwen/agents/<имя>.md`; вызов — инструмент `agent` с `subagent_type: "<имя>"` и `run_in_background: false` |
-| Stop-хук облачной платформы (`~/.claude/stop-hook-git-check.sh`), `CLAUDE_CODE_REMOTE`, облачное и админ-окружение | в Qwen Code их нет, эти пункты не применяются. Охрану выключает только человек: `GAUNTLET_GUARD=off qwen` в своём терминале |
+| Stop-хук облачной платформы (`~/.claude/stop-hook-git-check.sh`), `CLAUDE_CODE_REMOTE`, переход шагов 3 → 4 → 5–8 | платформенного хука нет; после ответа владельца с утверждением спецификации («да» / ответы шага 3) закоммить `spec:`, запушь ветку и **в этом же ходе без повторной остановки** выполни шаги 5–8 до открытого PR. Охрану выключает только человек: `GAUNTLET_GUARD=off qwen` в своём терминале |
 | модели и уровни («Правила владельца»: Fable, Opus, ультракод) | модель `qwen4-max`, уровень — `/effort` (у qwen4-max лестница `low` / `high` / `xhigh`, по умолчанию `high`); воркфлоу Qwen Code (`tools.workflowsEnabled`, слово `ultracode` в запросе) — только по явной просьбе владельца |
 | «Ответ Claude Code на комментарий <ревьюер>» | «Ответ Qwen Code на комментарий <ревьюер>»: подпись того, кто на самом деле отвечает |
 | предупреждение о 99 % лимита | предупреждение о квоте (Token Plan, подписка Qwen) или «пауза» от владельца: то же правило паузы |

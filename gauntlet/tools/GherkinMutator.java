@@ -905,7 +905,10 @@ public class GherkinMutator {
             out.println("Gherkin mutation: no mutants (no Examples values in scope) - OK.");
             return 0;
         }
-        Map<String, List<Outcome>> attempts = readResults(resultsDir, glue);
+        List<String> order = new ArrayList<>();
+        List<MessageStream> streams = messages == null ? List.of()
+                : readStreams(messages, "MUTANT ERROR    run order: ", order);
+        Map<String, List<Outcome>> attempts = readResults(resultsDir, glue, stepFailuresByScenario(streams));
         int killed = 0;
         int byUndefinedStep = 0;
         int byOtherException = 0;
@@ -962,7 +965,9 @@ public class GherkinMutator {
                         + "  " + f[1] + ":" + f[2] + " \"" + f[3] + "\"");
             }
         }
-        List<String> order = messages == null ? List.of() : runOrder(messages, manifest, controls, attempts);
+        if (messages != null) {
+            order.addAll(runOrder(streams, manifest, controls, attempts));
+        }
         out.println("Gherkin mutation: " + manifest.size() + " mutant(s) - " + killed + " killed"
                 + (byUndefinedStep > 0 ? " (" + byUndefinedStep + " only because no step definition matched the new value)" : "")
                 + (byOtherException > 0 ? " (" + byOtherException + " by a non-assertion exception thrown in a step)" : "")
@@ -1020,10 +1025,9 @@ public class GherkinMutator {
      * control after it (zN) started, in the same stream. Returns the errors ("MUTANT ERROR" lines: the Stop hook hands
      * them back to the agent); a missing or unreadable stream is one.
      */
-    static List<String> runOrder(Path messages, Map<String, String[]> mutants, Map<String, String[]> controls,
-                                 Map<String, List<Outcome>> attempts) throws IOException {
+    static List<String> runOrder(List<MessageStream> streams, Map<String, String[]> mutants, Map<String, String[]> controls,
+                                 Map<String, List<Outcome>> attempts) {
         List<String> errors = new ArrayList<>();
-        List<MessageStream> streams = readStreams(messages, "MUTANT ERROR    run order: ", errors);
         Map<String, Integer> records = new HashMap<>();
         for (MessageStream stream : streams) {
             Map<String, List<CaseRun>> byId = new LinkedHashMap<>();
@@ -1060,6 +1064,19 @@ public class GherkinMutator {
             }
         }
         return errors;
+    }
+
+    static Map<String, List<StepFailure>> stepFailuresByScenario(List<MessageStream> streams) {
+        Map<String, List<StepFailure>> map = new HashMap<>();
+        for (MessageStream stream : streams) {
+            for (CaseRun run : stream.runs) {
+                String id = generatedId(run.uri());
+                if (id != null) {
+                    map.computeIfAbsent(id, k -> new ArrayList<>()).add(run.stepFailure());
+                }
+            }
+        }
+        return map;
     }
 
     /** Test cases of one stream that ran at the same time: sorted by start, each must start once every one before it
@@ -1135,10 +1152,16 @@ public class GherkinMutator {
         return String.format(Locale.ROOT, "%.3f", nanos / 1e6);
     }
 
+    /** What Cucumber's message stream recorded for a failed testCaseStarted: either a hook failed ({@code inHook}),
+     *  or a Gherkin step ({@code pickleStepId}) failed at {@code line} with {@code trace}. */
+    record StepFailure(int line, boolean inHook, String trace) {
+    }
+
     /** One test case a stream records: the pickle (scenario) it ran - the uri of its feature file, the line of the
-     *  scenario or of its Examples row (-1 when the stream does not say), its name -, and when it started and finished,
-     *  in nanoseconds since the epoch (finished = -1: the stream holds no TestCaseFinished for it). */
-    record CaseRun(String uri, int line, String name, long started, long finished) {
+     *  scenario or of its Examples row (-1 when the stream does not say), its name -, when it started and finished,
+     *  in nanoseconds since the epoch (finished = -1: the stream holds no TestCaseFinished for it), and any step
+     *  failure recorded by testStepFinished. */
+    record CaseRun(String uri, int line, String name, long started, long finished, StepFailure stepFailure) {
     }
 
     /** One message stream: one Cucumber run, in one test JVM. */
@@ -1183,16 +1206,22 @@ public class GherkinMutator {
     /**
      * One NDJSON stream of Cucumber messages (cucumber.plugin message:FILE). The envelopes this reads are those of the
      * protocol Cucumber 7 and 8 write: gherkinDocument (the AST: every node's id and line), pickle (id, uri, name,
-     * astNodeIds - the scenario, then the Examples row), testCase (id, pickleId), testCaseStarted (id, testCaseId,
-     * timestamp), testCaseFinished (testCaseStartedId, timestamp). Anything malformed or a reference to nothing throws:
-     * a stream that does not hold together is no evidence of an order.
+     * steps, astNodeIds - the scenario, then the Examples row), testCase (id, pickleId, testSteps), testCaseStarted
+     * (id, testCaseId, timestamp), testStepFinished (testCaseStartedId, testStepId, testStepResult), testCaseFinished
+     * (testCaseStartedId, timestamp). Anything malformed or a reference to nothing throws: a stream that does not hold
+     * together is no evidence of an order.
      */
     static MessageStream readStream(Path file) throws IOException {
         MessageStream stream = new MessageStream(file.getFileName().toString());
         Map<String, Integer> lines = new HashMap<>();                    // AST node id -> line, of every document
         Map<String, Map<String, Object>> pickles = new HashMap<>();
+        Map<String, Object> pickleStepAstIds = new HashMap<>();          // pickleStepId -> astNodeIds
         Map<String, String> testCases = new HashMap<>();                 // test case id -> pickle id
+        Map<String, String> testStepToPickleStep = new HashMap<>();      // testStepId -> pickleStepId (null for a hook)
         Map<String, Map<String, Object>> started = new LinkedHashMap<>();
+        Map<String, String> firstFailedPickleStep = new HashMap<>();
+        Map<String, String> firstFailedTrace = new HashMap<>();
+        Set<String> hookFailed = new HashSet<>();
         Map<String, Long> finished = new HashMap<>();
         int number = 0;
         int envelopes = 0;
@@ -1215,14 +1244,48 @@ public class GherkinMutator {
                     case "pickle" -> {
                         Map<String, Object> pickle = Json.object(e.getValue(), "pickle");
                         pickles.put(Json.text(pickle, "id"), pickle);
+                        if (pickle.get("steps") instanceof List<?> steps) {
+                            for (Object stepObj : steps) {
+                                Map<String, Object> ps = Json.object(stepObj, "pickle.steps");
+                                if (ps.get("id") instanceof String psId) {
+                                    pickleStepAstIds.put(psId, ps.get("astNodeIds"));
+                                }
+                            }
+                        }
                     }
                     case "testCase" -> {
                         Map<String, Object> testCase = Json.object(e.getValue(), "testCase");
                         testCases.put(Json.text(testCase, "id"), Json.text(testCase, "pickleId"));
+                        if (testCase.get("testSteps") instanceof List<?> steps) {
+                            for (Object stepObj : steps) {
+                                Map<String, Object> ts = Json.object(stepObj, "testCase.testSteps");
+                                if (ts.get("id") instanceof String tsId) {
+                                    testStepToPickleStep.put(tsId, ts.get("pickleStepId") instanceof String psId ? psId : null);
+                                }
+                            }
+                        }
                     }
                     case "testCaseStarted" -> {
                         Map<String, Object> start = Json.object(e.getValue(), "testCaseStarted");
                         started.put(Json.text(start, "id"), start);
+                    }
+                    case "testStepFinished" -> {
+                        Map<String, Object> sf = Json.object(e.getValue(), "testStepFinished");
+                        String runId = Json.text(sf, "testCaseStartedId");
+                        String stepId = Json.text(sf, "testStepId");
+                        Map<String, Object> res = Json.object(sf.get("testStepResult"), "testStepResult");
+                        if ("FAILED".equals(res.get("status"))) {
+                            String psId = testStepToPickleStep.get(stepId);
+                            if (psId == null) {
+                                hookFailed.add(runId);
+                            } else if (!hookFailed.contains(runId) && !firstFailedPickleStep.containsKey(runId)) {
+                                firstFailedPickleStep.put(runId, psId);
+                                String msg = res.get("message") instanceof String m ? m : "";
+                                String excTrace = res.get("exception") instanceof Map<?, ?> exc
+                                        && exc.get("stackTrace") instanceof String st ? st : "";
+                                firstFailedTrace.put(runId, msg + (excTrace.isEmpty() ? "" : "\n" + excTrace));
+                            }
+                        }
                     }
                     case "testCaseFinished" -> {
                         Map<String, Object> finish = Json.object(e.getValue(), "testCaseFinished");
@@ -1244,16 +1307,31 @@ public class GherkinMutator {
                     .put(pickleLine(pickle, lines), Json.text(pickle, "name"));
         }
         for (Map.Entry<String, Map<String, Object>> e : started.entrySet()) {
+            String runId = e.getKey();
             String pickleId = testCases.get(Json.text(e.getValue(), "testCaseId"));
             Map<String, Object> pickle = pickleId == null ? null : pickles.get(pickleId);
             if (pickle == null) {
-                throw new IllegalStateException("test case " + e.getKey() + " started for a test case or pickle the"
+                throw new IllegalStateException("test case " + runId + " started for a test case or pickle the"
                         + " stream does not define");
             }
+            StepFailure sf = hookFailed.contains(runId) ? new StepFailure(-1, true, "")
+                    : firstFailedPickleStep.containsKey(runId)
+                    ? new StepFailure(stepAstLine(pickleStepAstIds.get(firstFailedPickleStep.get(runId)), lines),
+                            false, firstFailedTrace.getOrDefault(runId, ""))
+                    : null;
             stream.runs.add(new CaseRun(Json.text(pickle, "uri"), pickleLine(pickle, lines), Json.text(pickle, "name"),
-                    Json.nanos(e.getValue(), "timestamp"), finished.getOrDefault(e.getKey(), -1L)));
+                    Json.nanos(e.getValue(), "timestamp"), finished.getOrDefault(runId, -1L), sf));
         }
         return stream;
+    }
+
+    /** The line of a pickleStep in its feature file: the first AST node id of the step (PickleCompiler puts the Step
+     *  id first and any Examples row id second). */
+    static int stepAstLine(Object astNodeIds, Map<String, Integer> lines) {
+        if (!(astNodeIds instanceof List<?> ids) || ids.isEmpty()) {
+            return -1;
+        }
+        return lines.getOrDefault(Json.string(ids.get(0), "astNodeIds"), -1);
     }
 
     /** The line of a pickle: of its Examples row (the last AST node it comes from), else of its scenario; -1 when the
@@ -1786,7 +1864,8 @@ public class GherkinMutator {
      * {@code <error>} for the first attempt and {@code <rerunFailure>}/{@code <rerunError>} for each later one.
      * Reading only {@code <failure>} took a control that failed and then passed for a passed control.
      */
-    static Map<String, List<Outcome>> readResults(Path resultsDir, Glue glue) throws IOException {
+    static Map<String, List<Outcome>> readResults(Path resultsDir, Glue glue,
+                                                  Map<String, List<StepFailure>> streamFailures) throws IOException {
         Map<String, List<Outcome>> attempts = new LinkedHashMap<>();
         for (Element tc : testcases(resultsDir)) {
             Matcher m = RESULT_ID.matcher(tc.getAttribute("name") + " " + tc.getAttribute("classname"));
@@ -1795,6 +1874,7 @@ public class GherkinMutator {
             }
             String id = m.group(1) != null ? m.group(1) : m.group(2);
             List<Outcome> list = attempts.computeIfAbsent(id, k -> new ArrayList<>());
+            List<StepFailure> sfs = streamFailures.getOrDefault(id, List.of());
             boolean passedLast = true;              // no element stands for the last attempt: it passed
             for (Node n = tc.getFirstChild(); n != null; n = n.getNextSibling()) {
                 if (n instanceof Element e) {
@@ -1802,10 +1882,14 @@ public class GherkinMutator {
                         // The stage decides, not the element name: Gradle writes every failed scenario as
                         // <failure>, Surefire-style writers use <error> for a non-assertion exception.
                         case "failure", "error", "rerunFailure", "rerunError" -> {
-                            list.add(failureOutcome(e, glue, id));
+                            StepFailure sf = list.size() < sfs.size() ? sfs.get(list.size()) : null;
+                            list.add(failureOutcome(e, glue, id, sf));
                             passedLast = false;
                         }
-                        case "flakyFailure", "flakyError" -> list.add(failureOutcome(e, glue, id));
+                        case "flakyFailure", "flakyError" -> {
+                            StepFailure sf = list.size() < sfs.size() ? sfs.get(list.size()) : null;
+                            list.add(failureOutcome(e, glue, id, sf));
+                        }
                         case "skipped" -> {
                             list.add(new Outcome("aborted", ""));
                             passedLast = false;
@@ -1860,31 +1944,50 @@ public class GherkinMutator {
      * A failed scenario counts as "failed" (a kill for a mutant) only with positive evidence that a step DEFINITION
      * threw - whatever its type: a hard-coded list of assertion classes can never be complete (Cucumber's own
      * TableDiffException, Mockito and WireMock verifications, Awaitility timeouts are none of
-     * java.lang.AssertionError's usual names). The evidence is the step frame "at ✽.<step text>(feature:line)"
-     * that Cucumber appends after cutting the stack right behind the frame of the definition that threw. Without
-     * that cut the definition never ran: Cucumber's own runner frames before the step frame mean the glue object
-     * could not be created, no step frame at all with runner frames means the argument could not be converted or
-     * the step is ambiguous - "rejected". A definition that is a transformer (@ParameterType, @DataTableType,
-     * @DocStringType, a default transformer: its frame is the last before the step frame) rejected the value as
-     * well. A @Before/@After hook or a fixture fails without a step frame: "error". The control scenarios guard the
-     * other direction - a harness in which the UNMUTATED row fails in a step proves nothing either.
+     * java.lang.AssertionError's usual names). Primary evidence is the step frame "at ✽.<step text>(feature:line)"
+     * that Cucumber appends after cutting the stack right behind the frame of the definition that threw. Two runtime
+     * paths strip "✽." from JUnit XML even when a Gherkin step failed: (1) Awaitility.untilAsserted (or another pool)
+     * builds an AssertionError on a worker thread whose stack lacks the step method, so Cucumber's StackManipulation
+     * appends no "✽."; (2) Gradle 8.14's DefaultThrowableToTestFailureMapper walks getCause() and unwraps an outer
+     * step exception (e.g. ConditionTimeoutException with "✽.") to its inner AssertionError cause. When XML has no
+     * "✽." and no runner frame, Cucumber's own NDJSON stream (testStepFinished on a pickleStepId with no hook failure)
+     * proves whether a Gherkin step failed and on which feature line, while transformer and runner checks still reject
+     * conversions that failed before the step body ran.
      */
-    static Outcome failureOutcome(Element failure, Glue glue, String id) throws IOException {
+    static Outcome failureOutcome(Element failure, Glue glue, String id, StepFailure sf) throws IOException {
         String type = failure.getAttribute("type");
         if (undefinedStep(failure)) {
             return new Outcome("undefined", type);
         }
         String trace = trace(failure);
         int step = trace.indexOf("✽.");
-        if (step < 0) {
-            return new Outcome(trace.contains(RUNNER) ? "rejected" : "error", type);
+        if (step >= 0) {
+            String before = trace.substring(0, step);
+            if (before.contains(RUNNER) || glue != null && glue.isTransformer(lastFrame(before))) {
+                return new Outcome("rejected", type);
+            }
+            Matcher line = stepLine(id).matcher(trace);
+            return new Outcome("failed", type, line.find(step) ? Integer.parseInt(line.group(1)) : -1);
         }
-        String before = trace.substring(0, step);
-        if (before.contains(RUNNER) || glue != null && glue.isTransformer(lastFrame(before))) {
+        if (trace.contains(RUNNER)) {
             return new Outcome("rejected", type);
         }
-        Matcher line = stepLine(id).matcher(trace);
-        return new Outcome("failed", type, line.find(step) ? Integer.parseInt(line.group(1)) : -1);
+        if (sf != null && !sf.inHook()) {
+            int sfStep = sf.trace().indexOf("✽.");
+            if (sfStep >= 0) {
+                String before = sf.trace().substring(0, sfStep);
+                if (before.contains(RUNNER) || glue != null && glue.isTransformer(lastFrame(before))) {
+                    return new Outcome("rejected", type);
+                }
+                Matcher line = stepLine(id).matcher(sf.trace());
+                return new Outcome("failed", type, line.find(sfStep) ? Integer.parseInt(line.group(1)) : sf.line());
+            }
+            if (sf.trace().contains(RUNNER) || glue != null && glue.hasTransformerFrame(trace + "\n" + sf.trace())) {
+                return new Outcome("rejected", type);
+            }
+            return new Outcome("failed", type, sf.line());
+        }
+        return new Outcome("error", type);
     }
 
     /** The stack trace of one failed attempt: the text of {@code <failure>}/{@code <error>}; a flaky or rerun
@@ -1900,6 +2003,7 @@ public class GherkinMutator {
 
     /** Frames of Cucumber's own runner: in a step's stack they are cut away, unless no step definition ran. */
     static final String RUNNER = "io.cucumber.core.runner.";
+    static final Pattern LAMBDA_METHOD = Pattern.compile("^lambda\\$(.+)\\$\\d+$");
     /** The line of the step frame "✽.<step text>(file:///.../m1.feature:12)" of scenario {@code id}: the first
      *  "/<id>.feature:<line>)" after "✽." that ends a line of the trace. The step text is the step as it ran - an
      *  Examples value brings its colons, parentheses, line breaks and even a "see a.feature:3)" of its own into it -,
@@ -1917,28 +2021,34 @@ public class GherkinMutator {
     record Frame(String className, String method, int line) {
     }
 
+    static Frame parseFrame(String frame) {
+        int open = frame.length() - 1;                          // the "(" that the final ")" closes
+        for (int depth = 0; open > 0; open--) {
+            depth += frame.charAt(open) == ')' ? 1 : frame.charAt(open) == '(' ? -1 : 0;
+            if (depth == 0) {
+                break;
+            }
+        }
+        if (open <= 0) {
+            return null;
+        }
+        String name = frame.substring(0, open).substring(frame.substring(0, open).lastIndexOf('/') + 1); // without "app//"
+        String location = frame.substring(open + 1, frame.length() - 1);
+        String line = location.substring(location.lastIndexOf(':') + 1);
+        int dot = name.lastIndexOf('.');
+        return new Frame(dot < 0 ? "" : name.substring(0, dot), name.substring(dot + 1),
+                line.matches("\\d+") ? Integer.parseInt(line) : -1);
+    }
+
     /** The last frame in this part of a trace, or null. */
     static Frame lastFrame(String trace) {
         Frame last = null;
         Matcher m = FRAME.matcher(trace);
         while (m.find()) {
-            String frame = m.group(1);
-            int open = frame.length() - 1;                      // the "(" that the final ")" closes
-            for (int depth = 0; open > 0; open--) {
-                depth += frame.charAt(open) == ')' ? 1 : frame.charAt(open) == '(' ? -1 : 0;
-                if (depth == 0) {
-                    break;
-                }
+            Frame parsed = parseFrame(m.group(1));
+            if (parsed != null) {
+                last = parsed;
             }
-            if (open <= 0) {
-                continue;
-            }
-            String name = frame.substring(0, open).substring(frame.substring(0, open).lastIndexOf('/') + 1); // without "app//"
-            String location = frame.substring(open + 1, frame.length() - 1);
-            String line = location.substring(location.lastIndexOf(':') + 1);
-            int dot = name.lastIndexOf('.');
-            last = new Frame(dot < 0 ? "" : name.substring(0, dot), name.substring(dot + 1),
-                    line.matches("\\d+") ? Integer.parseInt(line) : -1);
         }
         return last;
     }
@@ -1979,10 +2089,48 @@ public class GherkinMutator {
             return lines != null && !(lines.other().contains(frame.line()) && !lines.transformer().contains(frame.line()));
         }
 
-        /** The transformer methods of the first class file of that name on the classpath. A class that is not there
-         *  fails the verdict: whether its method was a transformer is unknown, and a guess could count a rejected
-         *  value as a kill. */
-        Map<String, Lines> transformersOf(String className) throws IOException {
+        /** Worker-thread trace without "✽.": checks every frame on the glue classpath (including synthetic lambda$
+         *  frames inside a transformer). Throws when non-JDK frames exist and none of them are on the glue classpath. */
+        boolean hasTransformerFrame(String trace) throws IOException {
+            Matcher m = FRAME.matcher(trace);
+            boolean sawNonJdk = false;
+            boolean sawClasspath = classpath.isEmpty();
+            while (m.find()) {
+                Frame frame = parseFrame(m.group(1));
+                if (frame == null || frame.className().isEmpty()) {
+                    continue;
+                }
+                String resource = frame.className().replace('.', '/') + ".class";
+                if (ClassLoader.getPlatformClassLoader().getResource(resource) != null) {
+                    continue;
+                }
+                sawNonJdk = true;
+                Map<String, Lines> methods = classes.get(frame.className());
+                if (methods == null) {
+                    methods = findTransformersOf(frame.className());
+                    if (methods == null) {
+                        continue;
+                    }
+                    classes.put(frame.className(), methods);
+                }
+                sawClasspath = true;
+                Lines lines = methods.get(frame.method());
+                if (lines != null && !(lines.other().contains(frame.line()) && !lines.transformer().contains(frame.line()))) {
+                    return true;
+                }
+                Matcher syn = LAMBDA_METHOD.matcher(frame.method());
+                if (syn.matches() && methods.containsKey(syn.group(1))) {
+                    return true;
+                }
+            }
+            if (sawNonJdk && !sawClasspath) {
+                throw new IOException("no class of a worker-thread step failure trace is on the glue classpath (--glue)"
+                        + " - pass the classpath of the mutant run");
+            }
+            return false;
+        }
+
+        Map<String, Lines> findTransformersOf(String className) throws IOException {
             String resource = className.replace('.', '/') + ".class";
             for (String entry : classpath) {
                 Path root = Path.of(entry);
@@ -2008,6 +2156,18 @@ public class GherkinMutator {
                     }
                 }
             }
+            return null;
+        }
+
+        /** The transformer methods of the first class file of that name on the classpath. A class that is not there
+         *  fails the verdict: whether its method was a transformer is unknown, and a guess could count a rejected
+         *  value as a kill. */
+        Map<String, Lines> transformersOf(String className) throws IOException {
+            Map<String, Lines> found = findTransformersOf(className);
+            if (found != null) {
+                return found;
+            }
+            String resource = className.replace('.', '/') + ".class";
             if (ClassLoader.getPlatformClassLoader().getResource(resource) != null) {
                 return Map.of();                                // a class of the JDK itself is never glue
             }

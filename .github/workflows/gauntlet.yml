@@ -25,7 +25,7 @@ jobs:
   gauntlet:
     name: gauntlet
     runs-on: ubuntu-24.04                   # pinned: ubuntu-latest moves to Ubuntu 26 from 2026-10-19
-    timeout-minutes: 150                    # a large change runs about 100 minutes: mutation and Gherkin mutation
+    timeout-minutes: 360                    # sequential gherkinMutantsRun with cN/zN controls across ~50 features can run 3-4h
     env:
       ORG_GRADLE_PROJECT_publicRepositories: "true"   # outside the corporate network: public repositories
     steps:

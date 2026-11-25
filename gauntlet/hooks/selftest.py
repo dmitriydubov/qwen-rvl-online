@@ -2050,18 +2050,27 @@ def stop_tests(repo):
     record()
     r = stop()
     check("no change -> no run", r.returncode == 0 and "fake gradle" not in log(), r.stderr)
-    # spec-only turn: never runs the gate
+    # uncommitted spec-only turn: never runs the gate (draft waits for the human)
     write(repo, FEATURES + "/draft.feature", "# language: ru\nФункция: Черновик\n")
     r = stop()
     check("spec-only change -> no run", r.returncode == 0 and "fake gradle" not in log(), r.stderr)
-    # code change while the spec is still a draft: run without the acceptance tasks
+    # committed spec-only turn (Step 4 freeze with no code yet): must run full gauntletFast and hold on red
+    git(repo, "add", FEATURES)
+    git(repo, "commit", "-q", "-m", "spec: frozen before implementation")
+    r = stop(fake_exit="1")
+    check("committed spec with no code yet -> runs gate and blocks on red",
+          r.returncode == 2 and "fake gradle gauntletFast" in log() and "-x acceptanceTest" not in log()
+          and "attempt 1/3" in r.stderr, r.stderr + log())
+    os.remove(os.path.join(repo, M + "build/gauntlet/fake-exit"))
+    # code change while a second spec is still a draft: run without the acceptance tasks
+    write(repo, FEATURES + "/draft2.feature", "# language: ru\nФункция: Черновик 2\n")
     write(repo, M + "src/main/java/com/example/service/domain/Order.java", "package x; class Order {}\n")
     r = stop()
     check("pending spec -> acceptance excluded", r.returncode == 0 and "-x acceptanceTest -x acceptanceCheck" in log(), log())
     check("pending spec -> note to agent", "human's approval" in r.stdout, r.stdout)
     # commit the spec: acceptance tasks come back
     git(repo, "add", FEATURES)
-    git(repo, "commit", "-q", "-m", "spec: draft")
+    git(repo, "commit", "-q", "-m", "spec: draft2")
     write(repo, M + "src/main/java/com/example/service/domain/Order.java", "package x; class Order { int a; }\n")
     r = stop()
     check("committed spec -> full gauntletFast", r.returncode == 0 and "-x acceptanceTest" not in log(), log())
@@ -2083,6 +2092,16 @@ def stop_tests(repo):
     os.remove(os.path.join(repo, M + "build/gauntlet/gauntletFast-hook.log"))
     r = stop()
     check("green cached -> no re-run", r.returncode == 0 and not os.path.exists(os.path.join(repo, M + "build/gauntlet/gauntletFast-hook.log")))
+    # a single-turn spec write+commit after a green stop (e.g. spec.approval=pr) must also run the gate
+    write(repo, FEATURES + "/single_turn.feature", "# language: ru\nФункция: Сразу в коммит\n")
+    git(repo, "add", FEATURES)
+    git(repo, "commit", "-q", "-m", "spec: single-turn")
+    r = stop(fake_exit="1")
+    check("single-turn committed spec after green -> runs gate and blocks on red",
+          r.returncode == 2 and "-x acceptanceTest" not in log() and "attempt 1/3" in r.stderr, r.stderr + log())
+    write(repo, M + "src/main/java/com/example/service/domain/Order.java", "package x; class Order { int d; }\n")
+    r = stop()
+    check("single-turn committed spec implemented -> passes", r.returncode == 0, r.stderr)
     # a later spec-only turn (code unchanged since the last allowed stop) never waits for Gradle
     write(repo, FEATURES + "/second.feature", "# language: ru\nФункция: Вторая\n")
     if os.path.exists(os.path.join(repo, M + "build/gauntlet/gauntletFast-hook.log")):

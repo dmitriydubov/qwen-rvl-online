@@ -53,11 +53,34 @@ case "$vendor" in
     ;;
 esac
 
-if [ -n "$(git status --porcelain)" ]; then
-  git add -A -f
-  git commit -q -m "chore: activate ${vendor} adapter on base ${base_sha}. By coordinator."
+if git ls-remote --exit-code "$remote" refs/heads/main >/dev/null 2>&1; then
+  git fetch --quiet "$remote" refs/heads/main:refs/remotes/vendor/main
+  remote_main="$(git rev-parse refs/remotes/vendor/main)"
+else
+  remote_main=""
 fi
 
-git remote set-url origin "$remote"
-git push --force origin HEAD:refs/heads/main
-echo "[ok] ${vendor} -> ${remote} (base ${base_sha}, head $(git rev-parse --short HEAD))"
+if [ -n "$remote_main" ]; then
+  git add -A -f
+  tree_oid="$(git write-tree)"
+  if [ "$tree_oid" = "$(git rev-parse "${remote_main}^{tree}")" ]; then
+    echo "[ok] ${vendor} -> ${remote} already up to date (${remote_main:0:8})"
+    exit 0
+  fi
+  if [ "$vendor" = "neon" ] && [ -z "$(git status --porcelain)" ] && git merge-base --is-ancestor "$remote_main" "$full_sha"; then
+    target_commit="$full_sha"
+  elif git merge-base --is-ancestor "$remote_main" "$full_sha"; then
+    target_commit="$(git commit-tree "$tree_oid" -p "$full_sha" -m "chore: activate ${vendor} adapter on base ${base_sha}. By coordinator.")"
+  else
+    target_commit="$(git commit-tree "$tree_oid" -p "$remote_main" -p "$full_sha" -m "chore: sync ${vendor} adapter with base ${base_sha}. By coordinator.")"
+  fi
+  git push "$remote" "${target_commit}:refs/heads/main"
+  echo "[ok] ${vendor} -> ${remote} fast-forwarded (${remote_main:0:8} -> ${target_commit:0:8}, base ${base_sha})"
+else
+  if [ -n "$(git status --porcelain)" ]; then
+    git add -A -f
+    git commit -q -m "chore: activate ${vendor} adapter on base ${base_sha}. By coordinator."
+  fi
+  git push --force "$remote" HEAD:refs/heads/main
+  echo "[ok] ${vendor} -> ${remote} initialized (base ${base_sha}, head $(git rev-parse --short HEAD))"
+fi
