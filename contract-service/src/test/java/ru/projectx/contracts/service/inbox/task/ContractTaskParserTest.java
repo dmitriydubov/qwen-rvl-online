@@ -5,9 +5,13 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
+import java.util.List;
 import java.util.UUID;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import ru.projectx.contracts.exception.ContractViolationException;
 import ru.projectx.contracts.message.task.ContractTask;
@@ -20,8 +24,47 @@ import tools.jackson.databind.json.JsonMapper;
 
 class ContractTaskParserTest {
 
+    private static final JsonMapper JSON = JsonMapper.builder().build();
+    private static final List<String> OPTIONAL_FIELDS = List.of("program_id", "personal_data.middle_name",
+            "personal_data.relation_type", "personal_data.address", "personal_data.document.series",
+            "personal_data.document.issued_by", "personal_data.document.issued_at", "personal_data.document.division_code");
+
     private final ContractTaskParser parser =
             new ContractTaskParser(new MessageBodies(JsonMapper.builder().build()));
+
+    static Stream<Arguments> nonStringOptionalFields() {
+        return OPTIONAL_FIELDS.stream()
+                .flatMap(path -> Stream.of("5", "true", "[]", "{}").map(node -> Arguments.of(path, node)));
+    }
+
+    @ParameterizedTest
+    @MethodSource("nonStringOptionalFields")
+    void nonStringOptionalField_isViolationNamingTheFullPath(String path, String node) {
+        TaskBodies body = TaskBodies.upserted().withParticipantNode(1, path, JSON.readTree(node));
+
+        assertThatThrownBy(() -> parser.parse(body.toJson()))
+                .isInstanceOf(ContractViolationException.class)
+                .hasMessage("недопустимое значение поля data.participants[1]." + path);
+    }
+
+    @Test
+    void nullOptionalFields_areParsedAsEmpty() {
+        TaskBodies body = TaskBodies.upserted();
+        for (String path : OPTIONAL_FIELDS) {
+            body.withParticipantNode(1, path, JSON.readTree("null"));
+        }
+
+        TaskParticipant participant = parser.parse(body.toJson()).participants().get(1);
+
+        assertThat(participant.programId()).isNull();
+        assertThat(participant.person().middleName()).isNull();
+        assertThat(participant.person().relationType()).isNull();
+        assertThat(participant.person().address()).isNull();
+        assertThat(participant.person().document().series()).isNull();
+        assertThat(participant.person().document().issuedBy()).isNull();
+        assertThat(participant.person().document().issuedAt()).isNull();
+        assertThat(participant.person().document().divisionCode()).isNull();
+    }
 
     @Test
     void completeTask_isParsedWithEveryParticipantInOrder() {

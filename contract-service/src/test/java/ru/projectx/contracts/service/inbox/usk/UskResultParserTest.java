@@ -69,6 +69,35 @@ class UskResultParserTest {
         }
 
         @Test
+        void nullUskNumberWhenIssued_isParsedAsEmpty() {
+            UskResult.Issued result = (UskResult.Issued) parser.parse(LmPolicyResultBodies.issued()
+                    .withDataNode("policy_usk_number", JsonMapper.builder().build().readTree("null")).toJson());
+
+            assertThat(result.uskNumber()).isNull();
+        }
+
+        @ParameterizedTest
+        @ValueSource(strings = {"5", "true", "[]", "{}", "{\"fio\": \"ПДн\"}"})
+        void nonStringUskNumberWhenIssued_isViolationNamingTheField(String node) {
+            LmPolicyResultBodies body = LmPolicyResultBodies.issued()
+                    .withDataNode("policy_usk_number", JsonMapper.builder().build().readTree(node));
+
+            assertThatThrownBy(() -> parser.parse(body.toJson()))
+                    .isInstanceOf(ContractViolationException.class)
+                    .hasMessage("недопустимое значение поля data.policy_usk_number");
+        }
+
+        @ParameterizedTest
+        @ValueSource(strings = {"5", "true", "[]", "{}", "{\"fio\": \"ПДн\"}"})
+        void nonStringUskNumberWhenFailed_isNotRead(String node) {
+            UskResult result = parser.parse(LmPolicyResultBodies.failed()
+                    .withDataNode("policy_usk_number", JsonMapper.builder().build().readTree(node)).toJson());
+
+            assertThat(result).isEqualTo(new UskResult.Failed(UUID.fromString(LmPolicyResultBodies.POLICY_ID),
+                    "INSURED_NOT_COVERED", "Стенд: застрахованный не входит в корпоративный договор"));
+        }
+
+        @Test
         void missingPolicyWhenIssued_isViolationNamingTheField() {
             assertThatThrownBy(() -> parser.parse(LmPolicyResultBodies.issued().withoutDataField("policy").toJson()))
                     .isInstanceOf(ContractViolationException.class)

@@ -35,6 +35,23 @@ public class OneCPublishingSteps {
         publish(messageId, messages.issued(messageId, requestId, UUID.fromString(policyId), fields));
     }
 
+    @Когда("1С:УСК публикует в свою очередь результат выпуска {string} по полису ЛМ участника {string} заявки {string} с узлом вида {string} в поле policy_usk_number")
+    public void resultPublishedWithNumberNode(String messageId, String participantId, String requestId, String kind) {
+        ObjectNode body = messages.issued(messageId, requestId, records.latestLmPolicyId(participantId, requestId),
+                OneCMessages.ISSUED_EXAMPLE);
+        FieldNodes.put((ObjectNode) body.get("data"), "policy_usk_number", kind, "LM-000012204");
+        publish(messageId, body);
+    }
+
+    @Когда("1С:УСК публикует в свою очередь результат выпуска {string} по полису ЛМ участника {string} заявки {string} с ошибкой {string}, текстом {string} и узлом вида {string} в поле policy_usk_number")
+    public void failedResultPublishedWithNumberNode(String messageId, String participantId, String requestId,
+            String errorCode, String errorMessage, String kind) {
+        ObjectNode body = messages.failed(messageId, requestId, records.latestLmPolicyId(participantId, requestId),
+                errorCode, errorMessage);
+        FieldNodes.put((ObjectNode) body.get("data"), "policy_usk_number", kind, "LM-000012204");
+        publish(messageId, body);
+    }
+
     @Когда("1С:УСК публикует в свою очередь результат выпуска {string} по полису ЛМ участника {string} заявки {string} с дефектом {string}")
     public void defectiveResultPublished(String messageId, String participantId, String requestId, String defect) {
         publish(messageId, messages.defective(messageId, requestId,

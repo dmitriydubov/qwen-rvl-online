@@ -1,6 +1,7 @@
 package ru.projectx.contracts.support;
 
 import java.nio.charset.StandardCharsets;
+import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 import tools.jackson.databind.node.ArrayNode;
 import tools.jackson.databind.node.ObjectNode;
@@ -122,6 +123,21 @@ public final class TaskBodies {
 
     public TaskBodies withParticipantField(int index, String name, String value) {
         participant(index).put(name, value);
+        return this;
+    }
+
+    public TaskBodies withDataNode(String name, JsonNode value) {
+        ((ObjectNode) root.get("data")).set(name, value);
+        return this;
+    }
+
+    public TaskBodies withParticipantNode(int index, String path, JsonNode value) {
+        String[] names = path.split("\\.");
+        ObjectNode node = participant(index);
+        for (int i = 0; i < names.length - 1; i++) {
+            node = (ObjectNode) node.get(names[i]);
+        }
+        node.set(names[names.length - 1], value);
         return this;
     }
 

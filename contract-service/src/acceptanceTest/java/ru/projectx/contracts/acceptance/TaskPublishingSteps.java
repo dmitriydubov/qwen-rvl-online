@@ -81,6 +81,22 @@ public class TaskPublishingSteps {
         queue.called(queueName).publish(bytes);
     }
 
+    @Когда("сервис Заявок публикует в свою очередь задачу на выпуск {string} по заявке {string} версии {int} с узлом вида {string} в необязательном поле {string} участника {int} и участниками:")
+    public void taskPublishedWithFieldNode(String messageId, String requestId, int version, String kind, String field,
+            int index, List<Map<String, String>> participants) {
+        ObjectNode body = messages.upserted(messageId, requestId, version, participants);
+        FieldNodes.put(participant((ObjectNode) body.get("data"), index), field, kind, "Секретович");
+        publish(messageId, body);
+    }
+
+    @Когда("сервис Заявок публикует в свою очередь прекращение работы {string} по заявке {string} версии {int} с узлом вида {string} в поле cancel_comment")
+    public void cancellationPublishedWithCommentNode(String messageId, String requestId, int version, String kind) {
+        ObjectNode body = messages.cancelled(messageId, requestId, version,
+                Map.of("аннулировано", "2026-02-12T14:30:00+03:00", "причина", "INSURED_REFUSED"));
+        FieldNodes.put((ObjectNode) body.get("data"), "cancel_comment", kind, "Стенд: комментарий");
+        publish(messageId, body);
+    }
+
     @Дано("сервис Заявок публикует в свою очередь прекращение работы {string} по заявке {string} версии {int}:")
     public void cancellationPublished(String messageId, String requestId, int version, Map<String, String> fields) {
         publish(messageId, messages.cancelled(messageId, requestId, version, fields));

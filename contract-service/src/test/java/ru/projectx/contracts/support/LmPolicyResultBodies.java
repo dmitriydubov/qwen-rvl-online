@@ -1,6 +1,7 @@
 package ru.projectx.contracts.support;
 
 import java.nio.charset.StandardCharsets;
+import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 import tools.jackson.databind.node.ObjectNode;
 
@@ -67,6 +68,11 @@ public final class LmPolicyResultBodies {
 
     public LmPolicyResultBodies withDataField(String name, String value) {
         data().put(name, value);
+        return this;
+    }
+
+    public LmPolicyResultBodies withDataNode(String name, JsonNode value) {
+        data().set(name, value);
         return this;
     }
 

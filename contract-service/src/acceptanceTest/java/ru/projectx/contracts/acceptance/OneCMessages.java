@@ -49,6 +49,8 @@ public class OneCMessages {
             Map.entry("documents[1].file_size", "118784"));
 
     private static final ZoneId MOSCOW = ZoneId.of("Europe/Moscow");
+    private static final String LM_TOPIC = "sogaz1c.lm-policy.issued";
+    private static final String LM_EVENT = "LmPolicyIssued";
     private static final Pattern SEGMENT = Pattern.compile("([a-z_]+)(?:\\[(\\d+)])?");
     private static final Set<String> NUMERIC_FIELDS = Set.of("file_size");
     private static final String EMPTY_ARRAY = "[]";
@@ -63,7 +65,12 @@ public class OneCMessages {
     }
 
     ObjectNode issued(String messageId, String requestId, UUID policyId, Map<String, String> fields) {
-        return result(messageId, requestId, "sogaz1c.lm-policy.issued", "LmPolicyIssued", policyId, fields);
+        return result(messageId, requestId, LM_TOPIC, LM_EVENT, policyId, fields);
+    }
+
+    ObjectNode failed(String messageId, String requestId, UUID policyId, String errorCode, String errorMessage) {
+        return result(messageId, requestId, LM_TOPIC, LM_EVENT, policyId,
+                Map.of("status", "ERROR", "error_code", errorCode, "error_message", errorMessage));
     }
 
     ObjectNode registered(String messageId, String requestId, UUID contractId, Map<String, String> fields) {
