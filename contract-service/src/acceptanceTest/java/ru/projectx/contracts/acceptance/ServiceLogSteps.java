@@ -124,8 +124,12 @@ public class ServiceLogSteps {
         if (value.isEmpty()) {
             assertThat(entry.payload()).as("тело без поля %s", field).satisfiesAnyOf(
                     body -> assertThat(body).isNull(),
-                    body -> assertThat(messages.read(body.getBytes(StandardCharsets.UTF_8)).path("data").path("participants"))
-                            .isEmpty());
+                    body -> {
+                        JsonNode participants = messages.read(body.getBytes(StandardCharsets.UTF_8))
+                                .path("data").path("participants");
+                        assertThat(participants.isArray()).as("participants в теле без поля %s", field).isTrue();
+                        assertThat(participants).as("participants в теле без поля %s", field).isEmpty();
+                    });
             return;
         }
         String body = entry.payload() == null ? new String(published.of(messageId), StandardCharsets.UTF_8) : entry.payload();
@@ -148,11 +152,14 @@ public class ServiceLogSteps {
 
     static Optional<String> value(JsonNode body, String field) {
         JsonNode node = body.path("data");
-        Matcher segments = SEGMENT.matcher(field);
-        while (segments.find()) {
-            node = node.path(segments.group(1));
-            if (segments.group(2) != null) {
-                node = node.path(Integer.parseInt(segments.group(2)));
+        for (String segment : field.split("\\.", -1)) {
+            Matcher matcher = SEGMENT.matcher(segment);
+            if (!matcher.matches()) {
+                return Optional.empty();
+            }
+            node = node.path(matcher.group(1));
+            if (matcher.group(2) != null) {
+                node = node.path(Integer.parseInt(matcher.group(2)));
             }
         }
         return node.isString() ? Optional.of(node.stringValue()) : Optional.empty();

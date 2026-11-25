@@ -6,10 +6,15 @@ import io.cucumber.java.ru.Когда;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import tools.jackson.databind.node.ArrayNode;
 import tools.jackson.databind.node.ObjectNode;
 
 public class TaskPublishingSteps {
+
+    private static final Set<String> OPTIONAL_PARTICIPANT_FIELDS = Set.of("program_id", "personal_data.middle_name",
+            "personal_data.relation_type", "personal_data.address", "personal_data.document.series",
+            "personal_data.document.issued_by", "personal_data.document.issued_at", "personal_data.document.division_code");
 
     private static final List<Map<String, String>> DEFAULT_PARTICIPANTS = List.of(
             Map.of("участник", "ae8312c3-350b-4d0b-806c-5e2460e74dbc", "родственник", "нет", "доплата", "0.00"),
@@ -84,6 +89,9 @@ public class TaskPublishingSteps {
     @Когда("сервис Заявок публикует в свою очередь задачу на выпуск {string} по заявке {string} версии {int} с узлом вида {string} в необязательном поле {string} участника {int} и участниками:")
     public void taskPublishedWithFieldNode(String messageId, String requestId, int version, String kind, String field,
             int index, List<Map<String, String>> participants) {
+        if (!OPTIONAL_PARTICIPANT_FIELDS.contains(field)) {
+            throw new IllegalArgumentException("неизвестное необязательное поле участника: " + field);
+        }
         ObjectNode body = messages.upserted(messageId, requestId, version, participants);
         FieldNodes.put(participant((ObjectNode) body.get("data"), index), field, kind, "Секретович");
         publish(messageId, body);
