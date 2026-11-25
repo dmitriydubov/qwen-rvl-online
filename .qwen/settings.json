@@ -1,0 +1,140 @@
+{
+  "disableAllHooks": false,
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$QWEN_PROJECT_DIR/gauntlet/hooks/session_start.sh\"",
+            "timeout": 180,
+            "statusMessage": "Gauntlet: session start"
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$QWEN_PROJECT_DIR/gauntlet/adapters/qwen/qwen_hooks.py\" subagent-start",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "^(write_file|edit|notebook_edit|run_shell_command|monitor)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$QWEN_PROJECT_DIR/gauntlet/adapters/qwen/qwen_hooks.py\" pre-tool",
+            "timeout": 60
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$QWEN_PROJECT_DIR/gauntlet/hooks/stop_gate.py\" --task gauntletFast --max-attempts 3 --timeout 1700",
+            "timeout": 1800000,
+            "statusMessage": "Gauntlet: running ./gradlew gauntletFast..."
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "^hardener$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$QWEN_PROJECT_DIR/gauntlet/hooks/stop_gate.py\" --task mutationGate --max-attempts 2 --timeout 3300",
+            "timeout": 7200000,
+            "statusMessage": "Gauntlet: running ./gradlew mutationGate for the hardener..."
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "allow": [
+      "Bash(cd *)",
+      "Bash(./gradlew *)",
+      "Bash(git *)",
+      "Bash(gh pr create *)",
+      "Bash(gh pr view *)",
+      "Bash(gh pr checks *)",
+      "Bash(gh pr comment *)",
+      "Bash(javap *)",
+      "Bash(ls *)",
+      "Bash(cat *)",
+      "Bash(head *)",
+      "Bash(tail *)",
+      "Bash(wc *)",
+      "Bash(grep *)",
+      "Bash(rg *)",
+      "Bash(unzip -l *)",
+      "Bash(unzip -p *)",
+      "Bash(python3 gauntlet/hooks/stop_gate.py --verify-ran *)"
+    ],
+    "deny": [
+      "Bash(gh pr merge *)",
+      "Bash(gh workflow disable *)",
+      "Bash(git rebase *)",
+      "Bash(git filter-branch *)",
+      "Bash(git filter-repo *)",
+      "Bash(git update-ref *)",
+      "Bash(git replace *)",
+      "Bash(git revert *)",
+      "Bash(git commit --amend *)",
+      "Bash(git reset --hard *)",
+      "Bash(git push --force *)",
+      "Bash(git push -f *)",
+      "Bash(git push --force-with-lease *)",
+      "Bash(git push --mirror *)",
+      "Bash(git push --all *)",
+      "Bash(git checkout -B *)",
+      "Bash(git switch -C *)",
+      "Bash(git branch -f *)",
+      "Bash(git branch -D *)",
+      "Bash(git branch -M *)",
+      "Edit(/gauntlet/**)",
+      "Edit(/.qwen/**)",
+      "Edit(/.claude/**)",
+      "Edit(/QWEN.md)",
+      "Edit(/AGENTS.md)",
+      "Edit(/CLAUDE.md)",
+      "Edit(/.qwenignore)",
+      "Edit(/.github/workflows/gauntlet.yml)",
+      "Edit(/.github/workflows/gauntlet-kit.yml)",
+      "Edit(/CODEOWNERS)",
+      "Edit(/.github/CODEOWNERS)",
+      "Edit(/.gitlab/CODEOWNERS)",
+      "Edit(/.git/**)",
+      "Edit(~/.qwen/**)",
+      "Edit(~/.env)",
+      "save_memory"
+    ]
+  },
+  "tools": {
+    "approvalMode": "auto-edit",
+    "shell": {
+      "defaultTimeoutMs": 3600000
+    }
+  },
+  "context": {
+    "fileName": "QWEN.md"
+  },
+  "memory": {
+    "enableManagedAutoMemory": false,
+    "enableManagedAutoDream": false,
+    "enableTeamMemory": false,
+    "enableTeamMemorySync": false
+  }
+}
