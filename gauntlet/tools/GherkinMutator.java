@@ -13,22 +13,29 @@ import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.PathMatcher;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.Period;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Random;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.function.Function;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -54,7 +61,7 @@ import org.w3c.dom.NodeList;
  *
  * <pre>
  * java GherkinMutator.java generate --features src/acceptanceTest/resources/features \
- *      --out build/gherkin-mutation/mutants [--only-file changed-features]
+ *      --out build/gherkin-mutation/mutants [--only-file changed-features] [--glue-impact glue-impact]
  * java GherkinMutator.java verdict --mutants build/gherkin-mutation/mutants \
  *      --results build/gherkin-mutation/results [--glue build/classes/java/acceptanceTest --glue lib.jar ...]
  *      [--glue-file glue-classpath] [--messages build/gherkin-mutation/messages]
@@ -65,7 +72,10 @@ import org.w3c.dom.NodeList;
  * {@code --only-file} limits {@code generate} to the feature files it lists: each path ended by a NUL character, the
  * form {@code git diff --name-only -z} and {@code find -print0} write - a comma, a quote or a line break stays part
  * of its name. An empty file puts no feature in scope; a listed path that names no feature file under
- * {@code --features} is an error (exit 2), never a run over nothing. {@code --glue} names one entry of the classpath
+ * {@code --features} is an error (exit 2), never a run over nothing. With {@code --glue-impact} (Cucumber's acceptance
+ * message stream plus compiled {@code base} and {@code head} glue class directories), {@code generate} widens
+ * {@code --only-file} by every feature whose step definitions, hooks or parameter types changed transitively in
+ * bytecode, falling back to all features when global glue or context configuration changed. {@code --glue} names one entry of the classpath
  * of the mutant run each time (a class directory or a jar, never split at a separator); {@code --glue-file} lists
  * the entries the same way as {@code --only-file}.
  * {@code generate} writes one feature file per mutant: the original Scenario Outline with its
@@ -246,7 +256,8 @@ public class GherkinMutator {
             return switch (args[0]) {
                 case "generate" -> generate(Path.of(opts.getOrDefault("--features", "src/acceptanceTest/resources/features")),
                         Path.of(opts.getOrDefault("--out", "build/gherkin-mutation/mutants")),
-                        opts.containsKey("--only-file") ? pathList(Path.of(opts.get("--only-file"))) : null, out);
+                        opts.containsKey("--only-file") ? pathList(Path.of(opts.get("--only-file"))) : null,
+                        optionalPath(opts, "--glue-impact"), out);
                 case "verdict" -> verdict(Path.of(opts.getOrDefault("--mutants", "build/gherkin-mutation/mutants")),
                         Path.of(opts.getOrDefault("--results", "build/gherkin-mutation/results")),
                         glue(glue, opts.get("--glue-file")), optionalPath(opts, "--messages"), out);
@@ -271,6 +282,11 @@ public class GherkinMutator {
     // ---------------------------------------------------------------- generate
 
     static int generate(Path featuresDir, Path outDir, List<String> only, PrintStream out) throws IOException {
+        return generate(featuresDir, outDir, only, null, out);
+    }
+
+    static int generate(Path featuresDir, Path outDir, List<String> only, Path glueImpactFile, PrintStream out)
+            throws IOException {
         deleteRecursively(outDir);
         Files.createDirectories(outDir);
         if (!Files.isDirectory(featuresDir)) {
@@ -299,6 +315,9 @@ public class GherkinMutator {
                 out.println("GHERKIN ERROR the scope names no feature file under " + featuresDir + ": " + unknown);
                 return 2;
             }
+        }
+        if (glueImpactFile != null) {
+            only = GlueImpact.narrow(files, only, pathList(glueImpactFile), out);
         }
         List<Mutant> mutants = new ArrayList<>();
         List<Control> controls = new ArrayList<>();
@@ -2376,6 +2395,1409 @@ public class GherkinMutator {
             for (Path p : s.sorted((a, b) -> b.getNameCount() - a.getNameCount()).toList()) {
                 Files.delete(p);
             }
+        }
+    }
+
+    // ---------------------------------------------------------------- glue impact (method-level bytecode scope)
+
+    /**
+     * Narrows {@code generate} scope when acceptance glue {@code .java} files changed: instead of mutating every
+     * feature whenever any glue file is touched, compares compiled {@code base} and {@code head} glue bytecode at
+     * method and field granularity and joins changed glue definitions against {@code acceptanceTest}'s Cucumber
+     * message stream ({@code stepDefinition}, {@code hook}, {@code parameterType} -> {@code testCase} ->
+     * {@code pickle.uri}). Any global context/hook/transformer change or unreadable input conservatively returns
+     * {@code null} (mutate every feature).
+     */
+    static final class GlueImpact {
+        static final Set<String> GLOBAL_CLASS_ANNOTATIONS = Set.of(
+                "Lio/cucumber/spring/CucumberContextConfiguration;",
+                "Lorg/springframework/context/annotation/Configuration;",
+                "Lorg/springframework/boot/test/context/TestConfiguration;",
+                "Lorg/springframework/boot/test/context/SpringBootTest;",
+                "Lorg/springframework/test/context/ContextConfiguration;",
+                "Lorg/springframework/context/annotation/Primary;",
+                "Lorg/aspectj/lang/annotation/Aspect;");
+        static final Set<String> GLOBAL_INTERFACES = Set.of(
+                "org/springframework/beans/factory/config/BeanPostProcessor",
+                "org/springframework/beans/factory/config/BeanFactoryPostProcessor",
+                "org/springframework/context/ApplicationListener",
+                "org/springframework/context/SmartLifecycle",
+                "org/springframework/beans/factory/InitializingBean",
+                "org/springframework/beans/factory/DisposableBean");
+        static final Set<String> GLOBAL_METHOD_ANNOTATIONS = Set.of(
+                "Lorg/springframework/context/annotation/Bean;",
+                "Lorg/springframework/context/event/EventListener;",
+                "Lorg/springframework/amqp/rabbit/annotation/RabbitListener;",
+                "Lorg/springframework/scheduling/annotation/Scheduled;",
+                "Ljakarta/annotation/PostConstruct;",
+                "Ljakarta/annotation/PreDestroy;",
+                "Ljavax/annotation/PostConstruct;",
+                "Ljavax/annotation/PreDestroy;",
+                "Lio/cucumber/java/BeforeAll;",
+                "Lio/cucumber/java/AfterAll;",
+                "Lio/cucumber/java/DocStringType;",
+                "Lio/cucumber/java/DefaultParameterTransformer;",
+                "Lio/cucumber/java/DefaultDataTableEntryTransformer;",
+                "Lio/cucumber/java/DefaultDataTableCellTransformer;");
+        static final Set<String> SCENARIO_HOOK_ANNOTATIONS = Set.of(
+                "Lio/cucumber/java/Before;",
+                "Lio/cucumber/java/After;",
+                "Lio/cucumber/java/BeforeStep;",
+                "Lio/cucumber/java/AfterStep;");
+        static final String PARAMETER_TYPE = "Lio/cucumber/java/ParameterType;";
+        static final String DATA_TABLE_TYPE = "Lio/cucumber/java/DataTableType;";
+        static final int RELEVANT_METHOD_FLAGS = 0x0008 | 0x0020 | 0x0100 | 0x0400 | 0x0800;
+        static final int RELEVANT_FIELD_FLAGS = 0x0008 | 0x0010 | 0x0040;
+
+        record MethodKey(String owner, String name, String desc) implements Comparable<MethodKey> {
+            @Override
+            public int compareTo(MethodKey o) {
+                int c = owner.compareTo(o.owner);
+                if (c != 0) {
+                    return c;
+                }
+                c = name.compareTo(o.name);
+                return c != 0 ? c : desc.compareTo(o.desc);
+            }
+        }
+
+        record FieldKey(String owner, String name, String desc) implements Comparable<FieldKey> {
+            @Override
+            public int compareTo(FieldKey o) {
+                int c = owner.compareTo(o.owner);
+                if (c != 0) {
+                    return c;
+                }
+                c = name.compareTo(o.name);
+                return c != 0 ? c : desc.compareTo(o.desc);
+            }
+        }
+
+        record JavaTarget(String owner, String methodName, String paramDescPrefix) {
+        }
+
+        record RawMember(int flags, String name, String desc, List<AttrBytes> attrs) {
+        }
+
+        record AttrBytes(String name, byte[] data) {
+        }
+
+        record CpClass(int nameIdx) {
+        }
+
+        record CpString(int utf8Idx) {
+        }
+
+        record CpRef(int tag, int classIdx, int natIdx) {
+        }
+
+        record CpNat(int nameIdx, int descIdx) {
+        }
+
+        record CpHandle(int kind, int refIdx) {
+        }
+
+        record CpMethodType(int descIdx) {
+        }
+
+        record CpIndy(int tag, int bsmIdx, int natIdx) {
+        }
+
+        record Bsm(int mhIdx, List<Integer> args) {
+        }
+
+        record CodeDigest(String hash, List<MethodKey> calls, List<FieldKey> fields, Set<String> types) {
+        }
+
+        record FieldInfo(int flags, String name, String desc, Map<String, String> annotations, String ownHash,
+                         List<MethodKey> calls, List<FieldKey> fields, Set<String> types) {
+        }
+
+        record MethodInfo(int flags, String name, String desc, Map<String, String> annotations, String ownHash,
+                          List<MethodKey> calls, List<FieldKey> fields, Set<String> types) {
+            boolean isStatic() {
+                return (flags & 0x0008) != 0;
+            }
+        }
+
+        static final class ClassInfo {
+            final String name;
+            final String superName;
+            final List<String> interfaces;
+            final Map<String, String> annotations;
+            final String headerHash;
+            final String wholeClassHash;
+            final boolean nonPureInits;
+            final boolean hasSharedClinit;
+            final Map<String, FieldInfo> fields;
+            final Map<String, MethodInfo> methods;
+
+            ClassInfo(String name, String superName, List<String> interfaces, Map<String, String> annotations,
+                      String headerHash, String wholeClassHash, boolean nonPureInits, boolean hasSharedClinit,
+                      Map<String, FieldInfo> fields, Map<String, MethodInfo> methods) {
+                this.name = name;
+                this.superName = superName;
+                this.interfaces = interfaces;
+                this.annotations = annotations;
+                this.headerHash = headerHash;
+                this.wholeClassHash = wholeClassHash;
+                this.nonPureInits = nonPureInits;
+                this.hasSharedClinit = hasSharedClinit;
+                this.fields = fields;
+                this.methods = methods;
+            }
+
+            boolean isGlobalClass() {
+                for (String ann : annotations.keySet()) {
+                    if (GLOBAL_CLASS_ANNOTATIONS.contains(ann)) {
+                        return true;
+                    }
+                }
+                for (String itf : interfaces) {
+                    if (GLOBAL_INTERFACES.contains(itf) || itf.startsWith("io/cucumber/plugin/")) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+        }
+
+        static List<String> narrow(List<Path> featureFiles, List<String> changedFeatures, List<String> spec,
+                                   PrintStream out) {
+            try {
+                return narrowChecked(featureFiles, changedFeatures, spec, out);
+            } catch (IOException | RuntimeException e) {
+                out.println("Gherkin mutation: glue impact fallback (" + e.getMessage() + ") - every feature is mutated");
+                return null;
+            }
+        }
+
+        static List<String> narrowChecked(List<Path> featureFiles, List<String> changedFeatures, List<String> spec,
+                                          PrintStream out) throws IOException {
+            if (spec.size() < 3) {
+                return fallback(out, "incomplete --glue-impact specification");
+            }
+            Path messagesPath = Path.of(spec.get(0));
+            List<Path> baseDirs = new ArrayList<>();
+            List<Path> headDirs = new ArrayList<>();
+            List<Path> current = null;
+            for (int i = 1; i < spec.size(); i++) {
+                String token = spec.get(i);
+                if ("--base".equals(token)) {
+                    current = baseDirs;
+                } else if ("--head".equals(token)) {
+                    current = headDirs;
+                } else if (current != null) {
+                    current.add(Path.of(token));
+                }
+            }
+            GlueGraph base = GlueGraph.load(baseDirs);
+            GlueGraph head = GlueGraph.load(headDirs);
+            String globalReason = globalChangeReason(base, head);
+            if (globalReason != null) {
+                return fallback(out, globalReason);
+            }
+            List<Path> streamFiles = listStreams(messagesPath);
+            if (streamFiles.isEmpty()) {
+                return fallback(out, "no Cucumber acceptance message stream");
+            }
+            Map<String, JavaTarget> stepDefs = new HashMap<>();
+            Map<String, JavaTarget> hooks = new HashMap<>();
+            Map<String, JavaTarget> paramTypes = new HashMap<>();
+            Set<String> runHookIds = new HashSet<>();
+            Map<String, Path> pickleFiles = new HashMap<>();
+            Set<Path> compiledFiles = new HashSet<>();
+            List<Map<String, Object>> testCases = new ArrayList<>();
+            for (Path sf : streamFiles) {
+                readAcceptanceStream(sf, stepDefs, hooks, paramTypes, runHookIds, pickleFiles,
+                        compiledFiles, testCases);
+            }
+            for (String hookId : runHookIds) {
+                JavaTarget target = hooks.get(hookId);
+                if (target == null || targetChanged(base, head, target)) {
+                    return fallback(out, "changed run-level hook");
+                }
+            }
+            Set<String> changedStepIds = new HashSet<>();
+            for (Map.Entry<String, JavaTarget> e : stepDefs.entrySet()) {
+                if (e.getValue() == null || targetChanged(base, head, e.getValue())) {
+                    changedStepIds.add(e.getKey());
+                }
+            }
+            Set<String> changedHookIds = new HashSet<>();
+            for (Map.Entry<String, JavaTarget> e : hooks.entrySet()) {
+                if (e.getValue() == null || targetChanged(base, head, e.getValue())) {
+                    changedHookIds.add(e.getKey());
+                }
+            }
+            Set<String> changedParamNames = new HashSet<>();
+            for (Map.Entry<String, JavaTarget> e : paramTypes.entrySet()) {
+                if (e.getValue() == null || targetChanged(base, head, e.getValue())) {
+                    changedParamNames.add(e.getKey());
+                }
+            }
+            Set<Path> impactedRealPaths = new HashSet<>();
+            for (Map<String, Object> tc : testCases) {
+                Path feature = pickleFiles.get(Json.text(tc, "pickleId"));
+                if (feature == null || impactedRealPaths.contains(feature)) {
+                    continue;
+                }
+                if (testCaseImpacted(tc, changedStepIds, changedHookIds, changedParamNames)) {
+                    impactedRealPaths.add(feature);
+                }
+            }
+            List<String> scoped = new ArrayList<>();
+            for (Path file : featureFiles) {
+                boolean directlyChanged = changedFeatures != null && matchesAny(file, changedFeatures);
+                Path real = realPath(file);
+                boolean unloaded = hasGherkin(file) && !compiledFiles.contains(real);
+                if (directlyChanged || impactedRealPaths.contains(real) || unloaded) {
+                    scoped.add(file.toString());
+                }
+            }
+            out.println("Gherkin mutation: glue impact narrowed scope to " + scoped.size() + " of "
+                    + featureFiles.size() + " feature file(s)");
+            return scoped;
+        }
+
+        static List<String> fallback(PrintStream out, String reason) {
+            out.println("Gherkin mutation: glue impact affects global glue (" + reason + ") - every feature is mutated");
+            return null;
+        }
+
+        static String globalChangeReason(GlueGraph base, GlueGraph head) {
+            Set<String> allClasses = new TreeSet<>(base.classes.keySet());
+            allClasses.addAll(head.classes.keySet());
+            for (String cls : allClasses) {
+                ClassInfo b = base.classes.get(cls);
+                ClassInfo h = head.classes.get(cls);
+                if ((b != null && b.isGlobalClass()) || (h != null && h.isGlobalClass())) {
+                    if (b == null || h == null || !b.wholeClassHash.equals(h.wholeClassHash)) {
+                        return "context configuration " + cls;
+                    }
+                }
+            }
+            Set<MethodKey> globalMethods = new TreeSet<>();
+            collectAnnotatedMethods(base, GLOBAL_METHOD_ANNOTATIONS, globalMethods);
+            collectAnnotatedMethods(head, GLOBAL_METHOD_ANNOTATIONS, globalMethods);
+            for (MethodKey key : globalMethods) {
+                String bSig = base.globalBeanSignature(key);
+                String hSig = head.globalBeanSignature(key);
+                if (!Objects.equals(bSig, hSig)) {
+                    return "global method " + key.owner + "#" + key.name;
+                }
+            }
+            for (Map.Entry<String, ClassInfo> ce : base.classes.entrySet()) {
+                ClassInfo hClass = head.classes.get(ce.getKey());
+                for (MethodInfo bm : ce.getValue().methods.values()) {
+                    MethodKey key = new MethodKey(ce.getKey(), bm.name, bm.desc);
+                    MethodInfo hm = hClass == null ? null : hClass.methods.get(bm.name + bm.desc);
+                    if (hasAnyAnnotation(bm.annotations, SCENARIO_HOOK_ANNOTATIONS)) {
+                        if (hm == null || !sameSubsetAnnotations(bm.annotations, hm.annotations, SCENARIO_HOOK_ANNOTATIONS)) {
+                            return "removed or re-scoped hook " + key.owner + "#" + key.name;
+                        }
+                    }
+                    if (bm.annotations.containsKey(PARAMETER_TYPE)) {
+                        if (hm == null || !Objects.equals(bm.annotations.get(PARAMETER_TYPE),
+                                hm.annotations.get(PARAMETER_TYPE))) {
+                            return "removed or re-scoped @ParameterType " + key.owner + "#" + key.name;
+                        }
+                    }
+                    if (bm.annotations.containsKey(DATA_TABLE_TYPE)) {
+                        if (hm == null || !Objects.equals(base.methodSignature(key), head.methodSignature(key))) {
+                            return "changed @DataTableType " + key.owner + "#" + key.name;
+                        }
+                    }
+                    if (hasStepAnnotation(bm.annotations) && (hm == null || !hasStepAnnotation(hm.annotations))) {
+                        return "removed step definition " + key.owner + "#" + key.name;
+                    }
+                }
+            }
+            for (Map.Entry<String, ClassInfo> ce : head.classes.entrySet()) {
+                ClassInfo bClass = base.classes.get(ce.getKey());
+                for (MethodInfo hm : ce.getValue().methods.values()) {
+                    MethodInfo bm = bClass == null ? null : bClass.methods.get(hm.name + hm.desc);
+                    if (bm == null && hm.annotations.containsKey(PARAMETER_TYPE)
+                            && hm.annotations.get(PARAMETER_TYPE).contains("preferForRegexpMatch=true")) {
+                        return "preferForRegexpMatch @ParameterType " + ce.getKey() + "#" + hm.name;
+                    }
+                    if (bm == null && hm.annotations.containsKey(DATA_TABLE_TYPE)) {
+                        String ret = returnInternalName(hm.desc);
+                        if (ret == null || !head.classes.containsKey(ret) || base.classes.containsKey(ret)) {
+                            return "added @DataTableType for existing type " + ce.getKey() + "#" + hm.name;
+                        }
+                    }
+                }
+            }
+            return null;
+        }
+
+        static void collectAnnotatedMethods(GlueGraph g, Set<String> targets, Set<MethodKey> out) {
+            for (ClassInfo c : g.classes.values()) {
+                for (MethodInfo m : c.methods.values()) {
+                    if (hasAnyAnnotation(m.annotations, targets)) {
+                        out.add(new MethodKey(c.name, m.name, m.desc));
+                    }
+                }
+            }
+        }
+
+        static boolean hasAnyAnnotation(Map<String, String> anns, Set<String> targets) {
+            for (String k : anns.keySet()) {
+                if (targets.contains(k)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        static boolean sameSubsetAnnotations(Map<String, String> a, Map<String, String> b, Set<String> subset) {
+            for (String k : subset) {
+                if (!Objects.equals(a.get(k), b.get(k))) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        static boolean hasStepAnnotation(Map<String, String> anns) {
+            for (String k : anns.keySet()) {
+                if (k.startsWith("Lio/cucumber/java/") && k.indexOf('/', "Lio/cucumber/java/".length()) > 0) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        static String returnInternalName(String methodDesc) {
+            int close = methodDesc.lastIndexOf(')');
+            if (close < 0 || close + 2 >= methodDesc.length()) {
+                return null;
+            }
+            String ret = methodDesc.substring(close + 1);
+            return ret.startsWith("L") && ret.endsWith(";") ? ret.substring(1, ret.length() - 1) : null;
+        }
+
+        static boolean targetChanged(GlueGraph base, GlueGraph head, JavaTarget target) {
+            String bSig = base.targetSignature(target);
+            String hSig = head.targetSignature(target);
+            return bSig == null || hSig == null || !bSig.equals(hSig);
+        }
+
+        static boolean testCaseImpacted(Map<String, Object> tc, Set<String> changedStepIds, Set<String> changedHookIds,
+                                        Set<String> changedParamNames) {
+            if (!(tc.get("testSteps") instanceof List<?> steps)) {
+                return false;
+            }
+            for (Object stepObj : steps) {
+                Map<String, Object> ts = Json.object(stepObj, "testCase.testSteps");
+                if (ts.get("hookId") instanceof String hookId && changedHookIds.contains(hookId)) {
+                    return true;
+                }
+                if (ts.get("stepDefinitionIds") instanceof List<?> sdIds) {
+                    if (sdIds.size() != 1) {
+                        return true;
+                    }
+                    if (sdIds.get(0) instanceof String sdId && changedStepIds.contains(sdId)) {
+                        return true;
+                    }
+                }
+                if (ts.get("stepMatchArgumentsLists") instanceof List<?> argLists) {
+                    for (Object listObj : argLists) {
+                        Map<String, Object> listMap = Json.object(listObj, "stepMatchArgumentsLists");
+                        if (listMap.get("stepMatchArguments") instanceof List<?> args) {
+                            for (Object argObj : args) {
+                                Map<String, Object> arg = Json.object(argObj, "stepMatchArguments");
+                                if (arg.get("parameterTypeName") instanceof String pName
+                                        && changedParamNames.contains(pName)) {
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            return false;
+        }
+
+        static List<Path> listStreams(Path messages) throws IOException {
+            if (Files.isDirectory(messages)) {
+                try (Stream<Path> s = Files.list(messages)) {
+                    return s.filter(p -> p.toString().endsWith(".ndjson") && Files.isRegularFile(p)).sorted().toList();
+                }
+            }
+            return Files.isRegularFile(messages) ? List.of(messages) : List.of();
+        }
+
+        static void readAcceptanceStream(Path file, Map<String, JavaTarget> stepDefs, Map<String, JavaTarget> hooks,
+                                         Map<String, JavaTarget> paramTypes,
+                                         Set<String> runHookIds, Map<String, Path> pickleFiles,
+                                         Set<Path> compiledFiles, List<Map<String, Object>> testCases)
+                throws IOException {
+            int envelopes = 0;
+            for (String line : Files.readAllLines(file, StandardCharsets.UTF_8)) {
+                if (line.isBlank()) {
+                    continue;
+                }
+                Map<String, Object> envelope = Json.object(Json.parse(line), "envelope");
+                envelopes++;
+                for (Map.Entry<String, Object> e : envelope.entrySet()) {
+                    switch (e.getKey()) {
+                        case "stepDefinition" -> {
+                            Map<String, Object> sd = Json.object(e.getValue(), "stepDefinition");
+                            stepDefs.put(Json.text(sd, "id"), parseSourceRef(sd.get("sourceReference")));
+                        }
+                        case "hook" -> {
+                            Map<String, Object> hook = Json.object(e.getValue(), "hook");
+                            hooks.put(Json.text(hook, "id"), parseSourceRef(hook.get("sourceReference")));
+                        }
+                        case "parameterType" -> {
+                            Map<String, Object> pt = Json.object(e.getValue(), "parameterType");
+                            paramTypes.put(Json.text(pt, "name"), parseSourceRef(pt.get("sourceReference")));
+                        }
+                        case "testRunHookStarted" -> {
+                            Map<String, Object> trh = Json.object(e.getValue(), "testRunHookStarted");
+                            runHookIds.add(Json.text(trh, "hookId"));
+                        }
+                        case "pickle" -> {
+                            Map<String, Object> pickle = Json.object(e.getValue(), "pickle");
+                            Path f = featureFile(Json.text(pickle, "uri"));
+                            if (f != null) {
+                                pickleFiles.put(Json.text(pickle, "id"), f);
+                                compiledFiles.add(f);
+                            }
+                        }
+                        case "testCase" -> testCases.add(Json.object(e.getValue(), "testCase"));
+                        default -> {
+                        }
+                    }
+                }
+            }
+            if (envelopes == 0) {
+                throw new IOException("empty acceptance message stream " + file);
+            }
+        }
+
+        static JavaTarget parseSourceRef(Object refObj) {
+            if (!(refObj instanceof Map<?, ?> map)) {
+                return null;
+            }
+            if (map.get("javaMethod") instanceof Map<?, ?> jmObj) {
+                Map<String, Object> jm = Json.object(jmObj, "javaMethod");
+                String owner = Json.text(jm, "className").replace('.', '/');
+                String method = Json.text(jm, "methodName");
+                StringBuilder sb = new StringBuilder("(");
+                for (Object p : Json.list(jm.get("methodParameterTypes"), "methodParameterTypes")) {
+                    sb.append(typeToDescriptor(Json.string(p, "methodParameterTypes")));
+                }
+                sb.append(")");
+                return new JavaTarget(owner, method, sb.toString());
+            }
+            if (map.get("javaStackTraceElement") instanceof Map<?, ?> steObj) {
+                Map<String, Object> ste = Json.object(steObj, "javaStackTraceElement");
+                return new JavaTarget(Json.text(ste, "className").replace('.', '/'),
+                        Json.text(ste, "methodName"), null);
+            }
+            return null;
+        }
+
+        static String typeToDescriptor(String typeName) {
+            return switch (typeName) {
+                case "boolean" -> "Z";
+                case "byte" -> "B";
+                case "char" -> "C";
+                case "short" -> "S";
+                case "int" -> "I";
+                case "long" -> "J";
+                case "float" -> "F";
+                case "double" -> "D";
+                case "void" -> "V";
+                default -> {
+                    if (typeName.startsWith("[")) {
+                        yield typeName.replace('.', '/');
+                    }
+                    if (typeName.endsWith("[]")) {
+                        yield "[" + typeToDescriptor(typeName.substring(0, typeName.length() - 2));
+                    }
+                    yield "L" + typeName.replace('.', '/') + ";";
+                }
+            };
+        }
+
+        static final class GlueGraph {
+            final Map<String, ClassInfo> classes;
+            final Map<String, Set<String>> directSubtypes = new HashMap<>();
+            final Map<MethodKey, String> sigCache = new HashMap<>();
+
+            GlueGraph(Map<String, ClassInfo> classes) {
+                this.classes = classes;
+                for (ClassInfo c : classes.values()) {
+                    if (c.superName != null) {
+                        directSubtypes.computeIfAbsent(c.superName, k -> new TreeSet<>()).add(c.name);
+                    }
+                    for (String itf : c.interfaces) {
+                        directSubtypes.computeIfAbsent(itf, k -> new TreeSet<>()).add(c.name);
+                    }
+                }
+            }
+
+            static GlueGraph load(List<Path> dirs) throws IOException {
+                Map<String, ClassInfo> map = new LinkedHashMap<>();
+                for (Path dir : dirs) {
+                    if (!Files.isDirectory(dir)) {
+                        continue;
+                    }
+                    List<Path> classFiles;
+                    try (Stream<Path> s = Files.walk(dir)) {
+                        classFiles = s.filter(p -> p.toString().endsWith(".class") && Files.isRegularFile(p))
+                                .sorted().toList();
+                    }
+                    for (Path cf : classFiles) {
+                        ClassInfo info = parseClass(Files.readAllBytes(cf), cf.toString());
+                        map.putIfAbsent(info.name, info);
+                    }
+                }
+                return new GlueGraph(map);
+            }
+
+            String targetSignature(JavaTarget target) {
+                ClassInfo c = classes.get(target.owner);
+                if (c == null) {
+                    return null;
+                }
+                List<MethodKey> matched = new ArrayList<>();
+                for (MethodInfo m : c.methods.values()) {
+                    if (m.name.equals(target.methodName)
+                            && (target.paramDescPrefix == null || m.desc.startsWith(target.paramDescPrefix))) {
+                        matched.add(new MethodKey(c.name, m.name, m.desc));
+                    }
+                }
+                if (matched.isEmpty()) {
+                    return null;
+                }
+                matched.sort(MethodKey::compareTo);
+                MessageDigest md = sha256();
+                for (MethodKey key : matched) {
+                    update(md, key.desc + "=" + methodSignature(key) + ";");
+                }
+                return hex(md);
+            }
+
+            String globalBeanSignature(MethodKey root) {
+                ClassInfo c = classes.get(root.owner);
+                if (c == null || !c.methods.containsKey(root.name + root.desc)) {
+                    return null;
+                }
+                MessageDigest md = sha256();
+                update(md, methodSignature(root) + "|");
+                Set<String> visitedTypes = new TreeSet<>();
+                Deque<String> typeQueue = new ArrayDeque<>();
+                MethodInfo rm = c.methods.get(root.name + root.desc);
+                typeQueue.addAll(rm.types);
+                for (MethodKey call : rm.calls) {
+                    typeQueue.add(call.owner);
+                }
+                while (!typeQueue.isEmpty()) {
+                    String t = typeQueue.removeFirst();
+                    if (!classes.containsKey(t) || !visitedTypes.add(t)) {
+                        continue;
+                    }
+                    ClassInfo tc = classes.get(t);
+                    if (tc.superName != null) {
+                        typeQueue.add(tc.superName);
+                    }
+                    typeQueue.addAll(tc.interfaces);
+                    for (MethodInfo m : tc.methods.values()) {
+                        typeQueue.addAll(m.types);
+                        for (MethodKey call : m.calls) {
+                            typeQueue.add(call.owner);
+                        }
+                    }
+                }
+                for (String t : visitedTypes) {
+                    update(md, t + "=" + classes.get(t).wholeClassHash + ";");
+                }
+                return hex(md);
+            }
+
+            String methodSignature(MethodKey root) {
+                String cached = sigCache.get(root);
+                if (cached != null) {
+                    return cached;
+                }
+                ClassInfo rootClass = classes.get(root.owner);
+                if (rootClass == null || !rootClass.methods.containsKey(root.name + root.desc)) {
+                    return null;
+                }
+                MessageDigest md = sha256();
+                Set<MethodKey> seenMethods = new HashSet<>();
+                Set<FieldKey> seenFields = new HashSet<>();
+                Set<String> seenTypes = new TreeSet<>();
+                Deque<MethodKey> mQueue = new ArrayDeque<>();
+                Deque<FieldKey> fQueue = new ArrayDeque<>();
+                int lambdaSeq = 0;
+                mQueue.add(root);
+                while (!mQueue.isEmpty() || !fQueue.isEmpty()) {
+                    while (!mQueue.isEmpty()) {
+                        MethodKey mk = mQueue.removeFirst();
+                        for (MethodKey resolved : resolveMethods(mk)) {
+                            if (!seenMethods.add(resolved)) {
+                                continue;
+                            }
+                            ClassInfo ci = classes.get(resolved.owner);
+                            MethodInfo mi = ci.methods.get(resolved.name + resolved.desc);
+                            seenTypes.add(ci.name);
+                            addSupertypes(ci.name, seenTypes);
+                            if (LAMBDA_METHOD.matcher(mi.name).matches()) {
+                                update(md, "L#" + (lambdaSeq++) + ":" + ci.name + mi.desc + "=" + mi.ownHash + "\n");
+                            } else {
+                                update(md, "M:" + ci.name + "." + mi.name + mi.desc + "=" + mi.ownHash + "\n");
+                            }
+                            if (!mi.isStatic() && ci.nonPureInits) {
+                                for (MethodInfo init : ci.methods.values()) {
+                                    if ("<init>".equals(init.name)) {
+                                        mQueue.add(new MethodKey(ci.name, init.name, init.desc));
+                                    }
+                                }
+                            }
+                            if (ci.hasSharedClinit && ci.methods.containsKey("<clinit>()V")) {
+                                mQueue.add(new MethodKey(ci.name, "<clinit>", "()V"));
+                            }
+                            mQueue.addAll(mi.calls);
+                            fQueue.addAll(mi.fields);
+                            for (String t : mi.types) {
+                                if (classes.containsKey(t)) {
+                                    seenTypes.add(t);
+                                    addSupertypes(t, seenTypes);
+                                }
+                            }
+                        }
+                    }
+                    while (!fQueue.isEmpty()) {
+                        FieldKey fk = fQueue.removeFirst();
+                        FieldKey resolved = resolveField(fk);
+                        if (resolved == null || !seenFields.add(resolved)) {
+                            continue;
+                        }
+                        ClassInfo ci = classes.get(resolved.owner);
+                        FieldInfo fi = ci.fields.get(resolved.name + ":" + resolved.desc);
+                        seenTypes.add(ci.name);
+                        addSupertypes(ci.name, seenTypes);
+                        update(md, "F:" + ci.name + "." + fi.name + ":" + fi.desc + "=" + fi.ownHash + "\n");
+                        if (ci.hasSharedClinit && ci.methods.containsKey("<clinit>()V")) {
+                            mQueue.add(new MethodKey(ci.name, "<clinit>", "()V"));
+                        }
+                        mQueue.addAll(fi.calls);
+                        fQueue.addAll(fi.fields);
+                        for (String t : fi.types) {
+                            if (classes.containsKey(t)) {
+                                seenTypes.add(t);
+                                addSupertypes(t, seenTypes);
+                            }
+                        }
+                    }
+                }
+                for (String t : seenTypes) {
+                    update(md, "C:" + t + "=" + classes.get(t).headerHash + "\n");
+                }
+                String result = hex(md);
+                sigCache.put(root, result);
+                return result;
+            }
+
+            void addSupertypes(String typeName, Set<String> out) {
+                ClassInfo ci = classes.get(typeName);
+                if (ci == null) {
+                    return;
+                }
+                if (ci.superName != null && classes.containsKey(ci.superName) && out.add(ci.superName)) {
+                    addSupertypes(ci.superName, out);
+                }
+                for (String itf : ci.interfaces) {
+                    if (classes.containsKey(itf) && out.add(itf)) {
+                        addSupertypes(itf, out);
+                    }
+                }
+            }
+
+            List<MethodKey> resolveMethods(MethodKey ref) {
+                List<MethodKey> found = new ArrayList<>();
+                if (!classes.containsKey(ref.owner)) {
+                    return found;
+                }
+                MethodKey decl = findSuperMethod(ref.owner, ref.name, ref.desc, new HashSet<>());
+                if (decl != null) {
+                    found.add(decl);
+                }
+                if (!"<init>".equals(ref.name) && !"<clinit>".equals(ref.name)) {
+                    MethodInfo dm = decl == null ? null
+                            : classes.get(decl.owner).methods.get(decl.name + decl.desc);
+                    if (dm == null || !dm.isStatic()) {
+                        Set<String> subs = new TreeSet<>();
+                        collectSubtypes(ref.owner, subs);
+                        for (String sub : subs) {
+                            ClassInfo sc = classes.get(sub);
+                            if (sc != null && sc.methods.containsKey(ref.name + ref.desc)) {
+                                found.add(new MethodKey(sub, ref.name, ref.desc));
+                            }
+                        }
+                    }
+                }
+                return found;
+            }
+
+            MethodKey findSuperMethod(String owner, String name, String desc, Set<String> visited) {
+                if (owner == null || !visited.add(owner)) {
+                    return null;
+                }
+                ClassInfo ci = classes.get(owner);
+                if (ci == null) {
+                    return null;
+                }
+                if (ci.methods.containsKey(name + desc)) {
+                    return new MethodKey(owner, name, desc);
+                }
+                MethodKey sup = findSuperMethod(ci.superName, name, desc, visited);
+                if (sup != null) {
+                    return sup;
+                }
+                for (String itf : ci.interfaces) {
+                    MethodKey im = findSuperMethod(itf, name, desc, visited);
+                    if (im != null) {
+                        return im;
+                    }
+                }
+                return null;
+            }
+
+            void collectSubtypes(String owner, Set<String> out) {
+                for (String sub : directSubtypes.getOrDefault(owner, Set.of())) {
+                    if (out.add(sub)) {
+                        collectSubtypes(sub, out);
+                    }
+                }
+            }
+
+            FieldKey resolveField(FieldKey ref) {
+                return findSuperField(ref.owner, ref.name, ref.desc, new HashSet<>());
+            }
+
+            FieldKey findSuperField(String owner, String name, String desc, Set<String> visited) {
+                if (owner == null || !visited.add(owner)) {
+                    return null;
+                }
+                ClassInfo ci = classes.get(owner);
+                if (ci == null) {
+                    return null;
+                }
+                if (ci.fields.containsKey(name + ":" + desc)) {
+                    return new FieldKey(owner, name, desc);
+                }
+                FieldKey sup = findSuperField(ci.superName, name, desc, visited);
+                if (sup != null) {
+                    return sup;
+                }
+                for (String itf : ci.interfaces) {
+                    FieldKey f = findSuperField(itf, name, desc, visited);
+                    if (f != null) {
+                        return f;
+                    }
+                }
+                return null;
+            }
+        }
+
+        static ClassInfo parseClass(byte[] bytes, String where) throws IOException {
+            try {
+                DataInputStream in = new DataInputStream(new ByteArrayInputStream(bytes));
+                if (in.readInt() != 0xCAFEBABE) {
+                    throw new IOException("not a class file");
+                }
+                skip(in, 4);
+                Object[] cp = new Object[in.readUnsignedShort()];
+                for (int i = 1; i < cp.length; i++) {
+                    int tag = in.readUnsignedByte();
+                    switch (tag) {
+                        case 1 -> cp[i] = in.readUTF();
+                        case 3 -> cp[i] = in.readInt();
+                        case 4 -> cp[i] = Float.floatToRawIntBits(in.readFloat());
+                        case 5 -> {
+                            cp[i] = in.readLong();
+                            i++;
+                        }
+                        case 6 -> {
+                            cp[i] = Double.doubleToRawLongBits(in.readDouble());
+                            i++;
+                        }
+                        case 7, 19, 20 -> cp[i] = new CpClass(in.readUnsignedShort());
+                        case 8 -> cp[i] = new CpString(in.readUnsignedShort());
+                        case 9, 10, 11 -> cp[i] = new CpRef(tag, in.readUnsignedShort(), in.readUnsignedShort());
+                        case 12 -> cp[i] = new CpNat(in.readUnsignedShort(), in.readUnsignedShort());
+                        case 15 -> cp[i] = new CpHandle(in.readUnsignedByte(), in.readUnsignedShort());
+                        case 16 -> cp[i] = new CpMethodType(in.readUnsignedShort());
+                        case 17, 18 -> cp[i] = new CpIndy(tag, in.readUnsignedShort(), in.readUnsignedShort());
+                        default -> throw new IOException("unknown constant pool tag " + tag);
+                    }
+                }
+                int classFlags = in.readUnsignedShort();
+                String thisClass = cpClass(cp, in.readUnsignedShort());
+                int superIdx = in.readUnsignedShort();
+                String superClass = superIdx == 0 ? null : cpClass(cp, superIdx);
+                List<String> interfaces = new ArrayList<>();
+                for (int n = in.readUnsignedShort(); n > 0; n--) {
+                    interfaces.add(cpClass(cp, in.readUnsignedShort()));
+                }
+                List<RawMember> rawFields = readRawMembers(in, cp);
+                List<RawMember> rawMethods = readRawMembers(in, cp);
+                List<AttrBytes> classAttrs = readRawAttrs(in, cp);
+                List<Bsm> bsms = new ArrayList<>();
+                Map<String, String> classAnns = new TreeMap<>();
+                for (AttrBytes attr : classAttrs) {
+                    if ("BootstrapMethods".equals(attr.name)) {
+                        DataInputStream a = new DataInputStream(new ByteArrayInputStream(attr.data));
+                        for (int n = a.readUnsignedShort(); n > 0; n--) {
+                            int mh = a.readUnsignedShort();
+                            List<Integer> args = new ArrayList<>();
+                            for (int k = a.readUnsignedShort(); k > 0; k--) {
+                                args.add(a.readUnsignedShort());
+                            }
+                            bsms.add(new Bsm(mh, args));
+                        }
+                    } else if ("RuntimeVisibleAnnotations".equals(attr.name)
+                            || "RuntimeInvisibleAnnotations".equals(attr.name)) {
+                        readAnnotations(attr.data, cp, classAnns);
+                    }
+                }
+                Map<String, List<CodeDigest>> clinitSlices = new HashMap<>();
+                boolean hasSharedClinit = false;
+                for (RawMember rm : rawMethods) {
+                    if ("<clinit>".equals(rm.name) && "()V".equals(rm.desc)) {
+                        hasSharedClinit = !sliceClinit(rm, thisClass, cp, bsms, clinitSlices);
+                    }
+                }
+                Map<String, FieldInfo> fields = new LinkedHashMap<>();
+                for (RawMember rf : rawFields) {
+                    Map<String, String> anns = new TreeMap<>();
+                    String constVal = "";
+                    for (AttrBytes attr : rf.attrs) {
+                        if ("RuntimeVisibleAnnotations".equals(attr.name)
+                                || "RuntimeInvisibleAnnotations".equals(attr.name)) {
+                            readAnnotations(attr.data, cp, anns);
+                        } else if ("ConstantValue".equals(attr.name)) {
+                            DataInputStream a = new DataInputStream(new ByteArrayInputStream(attr.data));
+                            constVal = cpSymbolic(cp, bsms, a.readUnsignedShort(), new ArrayList<>(),
+                                    new ArrayList<>(), new TreeSet<>());
+                        }
+                    }
+                    MessageDigest fmd = sha256();
+                    update(fmd, (rf.flags & RELEVANT_FIELD_FLAGS) + "|" + rf.name + "|" + rf.desc + "|" + anns
+                            + "|" + constVal + "|");
+                    List<MethodKey> fCalls = new ArrayList<>();
+                    List<FieldKey> fFields = new ArrayList<>();
+                    Set<String> fTypes = new TreeSet<>();
+                    addDescriptorTypes(rf.desc, fTypes);
+                    for (CodeDigest slice : clinitSlices.getOrDefault(rf.name + ":" + rf.desc, List.of())) {
+                        update(fmd, slice.hash + ";");
+                        fCalls.addAll(slice.calls);
+                        fFields.addAll(slice.fields);
+                        fTypes.addAll(slice.types);
+                    }
+                    fields.put(rf.name + ":" + rf.desc,
+                            new FieldInfo(rf.flags, rf.name, rf.desc, anns, hex(fmd), fCalls, fFields, fTypes));
+                }
+                Map<String, MethodInfo> methods = new LinkedHashMap<>();
+                boolean nonPureInits = false;
+                for (RawMember rm : rawMethods) {
+                    Map<String, String> anns = new TreeMap<>();
+                    List<String> paramAnns = new ArrayList<>();
+                    byte[] codeAttr = null;
+                    for (AttrBytes attr : rm.attrs) {
+                        switch (attr.name) {
+                            case "RuntimeVisibleAnnotations", "RuntimeInvisibleAnnotations" ->
+                                    readAnnotations(attr.data, cp, anns);
+                            case "RuntimeVisibleParameterAnnotations", "RuntimeInvisibleParameterAnnotations" ->
+                                    paramAnns.add(readParameterAnnotations(attr.data, cp));
+                            case "Code" -> codeAttr = attr.data;
+                            default -> {
+                            }
+                        }
+                    }
+                    CodeDigest cd = codeAttr == null
+                            ? new CodeDigest("NO_CODE", List.of(), List.of(), new TreeSet<>())
+                            : decodeMethodCode(codeAttr, thisClass, cp, bsms);
+                    Set<String> mTypes = new TreeSet<>(cd.types);
+                    addDescriptorTypes(rm.desc, mTypes);
+                    if ("<init>".equals(rm.name) && (codeAttr == null || !isPureFieldInit(codeAttr, thisClass, superClass, cp))) {
+                        nonPureInits = true;
+                    }
+                    MessageDigest mmd = sha256();
+                    String normName = LAMBDA_METHOD.matcher(rm.name).matches() ? "<lambda>" : rm.name;
+                    update(mmd, (rm.flags & RELEVANT_METHOD_FLAGS) + "|" + normName + "|" + rm.desc + "|" + anns
+                            + "|" + paramAnns + "|" + cd.hash);
+                    methods.put(rm.name + rm.desc,
+                            new MethodInfo(rm.flags, rm.name, rm.desc, anns, hex(mmd), cd.calls, cd.fields, mTypes));
+                }
+                MessageDigest hmd = sha256();
+                update(hmd, (classFlags & 0x2610) + "|" + thisClass + "|" + Objects.toString(superClass, "")
+                        + "|" + interfaces + "|" + classAnns);
+                String headerHash = hex(hmd);
+                MessageDigest wmd = sha256();
+                update(wmd, headerHash + "\n");
+                for (FieldInfo fi : fields.values()) {
+                    update(wmd, "F:" + fi.name + ":" + fi.desc + "=" + fi.ownHash + "\n");
+                }
+                for (MethodInfo mi : methods.values()) {
+                    update(wmd, "M:" + mi.name + mi.desc + "=" + mi.ownHash + "\n");
+                }
+                return new ClassInfo(thisClass, superClass, interfaces, classAnns, headerHash, hex(wmd),
+                        nonPureInits, hasSharedClinit, fields, methods);
+            } catch (IOException | RuntimeException e) {
+                throw new IOException("cannot parse glue class " + where + ": " + e.getMessage(), e);
+            }
+        }
+
+        static List<RawMember> readRawMembers(DataInputStream in, Object[] cp) throws IOException {
+            List<RawMember> list = new ArrayList<>();
+            for (int count = in.readUnsignedShort(); count > 0; count--) {
+                int flags = in.readUnsignedShort();
+                String name = cpUtf8(cp, in.readUnsignedShort());
+                String desc = cpUtf8(cp, in.readUnsignedShort());
+                list.add(new RawMember(flags, name, desc, readRawAttrs(in, cp)));
+            }
+            return list;
+        }
+
+        static List<AttrBytes> readRawAttrs(DataInputStream in, Object[] cp) throws IOException {
+            List<AttrBytes> attrs = new ArrayList<>();
+            for (int count = in.readUnsignedShort(); count > 0; count--) {
+                String name = cpUtf8(cp, in.readUnsignedShort());
+                byte[] data = bytes(in, in.readInt());
+                attrs.add(new AttrBytes(name, data));
+            }
+            return attrs;
+        }
+
+        static void readAnnotations(byte[] data, Object[] cp, Map<String, String> out) throws IOException {
+            DataInputStream a = new DataInputStream(new ByteArrayInputStream(data));
+            for (int n = a.readUnsignedShort(); n > 0; n--) {
+                String type = cpUtf8(cp, a.readUnsignedShort());
+                out.put(type, readElementValuePairs(a, cp));
+            }
+        }
+
+        static String readParameterAnnotations(byte[] data, Object[] cp) throws IOException {
+            DataInputStream a = new DataInputStream(new ByteArrayInputStream(data));
+            int params = a.readUnsignedByte();
+            StringBuilder sb = new StringBuilder();
+            for (int p = 0; p < params; p++) {
+                Map<String, String> map = new TreeMap<>();
+                for (int n = a.readUnsignedShort(); n > 0; n--) {
+                    map.put(cpUtf8(cp, a.readUnsignedShort()), readElementValuePairs(a, cp));
+                }
+                sb.append(p).append(':').append(map).append(';');
+            }
+            return sb.toString();
+        }
+
+        static String readElementValuePairs(DataInputStream a, Object[] cp) throws IOException {
+            Map<String, String> pairs = new TreeMap<>();
+            for (int count = a.readUnsignedShort(); count > 0; count--) {
+                String name = cpUtf8(cp, a.readUnsignedShort());
+                pairs.put(name, readElementValue(a, cp));
+            }
+            return pairs.toString();
+        }
+
+        static String readElementValue(DataInputStream a, Object[] cp) throws IOException {
+            int tag = a.readUnsignedByte();
+            return switch (tag) {
+                case 'B', 'C', 'D', 'F', 'I', 'J', 'S', 'Z', 's', 'c' ->
+                        (char) tag + ":" + cpConstValue(cp, a.readUnsignedShort());
+                case 'e' -> "e:" + cpUtf8(cp, a.readUnsignedShort()) + "." + cpUtf8(cp, a.readUnsignedShort());
+                case '@' -> "@" + cpUtf8(cp, a.readUnsignedShort()) + readElementValuePairs(a, cp);
+                case '[' -> {
+                    List<String> items = new ArrayList<>();
+                    for (int n = a.readUnsignedShort(); n > 0; n--) {
+                        items.add(readElementValue(a, cp));
+                    }
+                    yield items.toString();
+                }
+                default -> throw new IOException("unknown annotation element tag " + tag);
+            };
+        }
+
+        static boolean isPureFieldInit(byte[] codeAttr, String thisClass, String superClass, Object[] cp)
+                throws IOException {
+            if (!"java/lang/Object".equals(superClass)) {
+                return false;
+            }
+            DataInputStream a = new DataInputStream(new ByteArrayInputStream(codeAttr));
+            skip(a, 4);
+            byte[] code = bytes(a, a.readInt());
+            if (a.readUnsignedShort() != 0) {
+                return false;
+            }
+            int pc = 0;
+            while (pc < code.length) {
+                int op = code[pc] & 0xFF;
+                if (op >= 0x1A && op <= 0x2D || op == 0xB1) {
+                    pc += 1;
+                } else if (op >= 0x15 && op <= 0x19) {
+                    pc += 2;
+                } else if (op == 0xB7) {
+                    CpRef ref = (CpRef) cp[u2(code, pc + 1)];
+                    CpNat nat = (CpNat) cp[ref.natIdx];
+                    if (!"java/lang/Object".equals(cpClass(cp, ref.classIdx))
+                            || !"<init>".equals(cpUtf8(cp, nat.nameIdx))
+                            || !"()V".equals(cpUtf8(cp, nat.descIdx))) {
+                        return false;
+                    }
+                    pc += 3;
+                } else if (op == 0xB5) {
+                    CpRef ref = (CpRef) cp[u2(code, pc + 1)];
+                    if (!thisClass.equals(cpClass(cp, ref.classIdx))) {
+                        return false;
+                    }
+                    pc += 3;
+                } else {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        static boolean sliceClinit(RawMember clinit, String thisClass, Object[] cp, List<Bsm> bsms,
+                                   Map<String, List<CodeDigest>> out) throws IOException {
+            byte[] codeAttr = null;
+            for (AttrBytes attr : clinit.attrs) {
+                if ("Code".equals(attr.name)) {
+                    codeAttr = attr.data;
+                }
+            }
+            if (codeAttr == null) {
+                return true;
+            }
+            DataInputStream a = new DataInputStream(new ByteArrayInputStream(codeAttr));
+            skip(a, 4);
+            byte[] code = bytes(a, a.readInt());
+            if (a.readUnsignedShort() != 0) {
+                return false;
+            }
+            int sliceStart = 0;
+            int pc = 0;
+            while (pc < code.length) {
+                int op = code[pc] & 0xFF;
+                if ((op >= 0x99 && op <= 0xAB) || op == 0xBF || (op >= 0xC6 && op <= 0xC9) || op == 0xB5) {
+                    return false;
+                }
+                int len = instructionLength(code, pc);
+                if (op == 0xB3) {
+                    CpRef ref = (CpRef) cp[u2(code, pc + 1)];
+                    if (!thisClass.equals(cpClass(cp, ref.classIdx))) {
+                        return false;
+                    }
+                    CpNat nat = (CpNat) cp[ref.natIdx];
+                    String fKey = cpUtf8(cp, nat.nameIdx) + ":" + cpUtf8(cp, nat.descIdx);
+                    out.computeIfAbsent(fKey, k -> new ArrayList<>())
+                            .add(decodeSlice(code, sliceStart, pc, thisClass, cp, bsms));
+                    sliceStart = pc + len;
+                } else if (op == 0xB1 && pc + len == code.length && sliceStart == pc) {
+                    return true;
+                }
+                pc += len;
+            }
+            return sliceStart == code.length;
+        }
+
+        static CodeDigest decodeMethodCode(byte[] codeAttr, String thisClass, Object[] cp, List<Bsm> bsms)
+                throws IOException {
+            DataInputStream a = new DataInputStream(new ByteArrayInputStream(codeAttr));
+            skip(a, 4);
+            byte[] code = bytes(a, a.readInt());
+            CodeDigest body = decodeSlice(code, 0, code.length, thisClass, cp, bsms);
+            MessageDigest md = sha256();
+            update(md, body.hash + "|exc:");
+            Set<String> types = new TreeSet<>(body.types);
+            for (int n = a.readUnsignedShort(); n > 0; n--) {
+                int spc = a.readUnsignedShort();
+                int epc = a.readUnsignedShort();
+                int hpc = a.readUnsignedShort();
+                int ctype = a.readUnsignedShort();
+                String cname = ctype == 0 ? "*" : cpClass(cp, ctype);
+                if (ctype != 0) {
+                    types.add(cname);
+                }
+                update(md, spc + "-" + epc + "->" + hpc + ":" + cname + ";");
+            }
+            return new CodeDigest(hex(md), body.calls, body.fields, types);
+        }
+
+        static CodeDigest decodeSlice(byte[] code, int fromPc, int toPc, String thisClass, Object[] cp, List<Bsm> bsms)
+                throws IOException {
+            MessageDigest md = sha256();
+            List<MethodKey> calls = new ArrayList<>();
+            List<FieldKey> fields = new ArrayList<>();
+            Set<String> types = new TreeSet<>();
+            int pc = fromPc;
+            while (pc < toPc) {
+                int relPc = pc - fromPc;
+                int op = code[pc] & 0xFF;
+                int len = instructionLength(code, pc);
+                switch (op) {
+                    case 0x12 -> update(md, relPc + ":ldc:" + cpSymbolic(cp, bsms, code[pc + 1] & 0xFF, calls, fields, types) + ";");
+                    case 0x13, 0x14 -> update(md, relPc + ":ldc:" + cpSymbolic(cp, bsms, u2(code, pc + 1), calls, fields, types) + ";");
+                    case 0x99, 0x9A, 0x9B, 0x9C, 0x9D, 0x9E, 0x9F, 0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8,
+                            0xC6, 0xC7 -> update(md, relPc + ":br" + op + ":" + (relPc + s2(code, pc + 1)) + ";");
+                    case 0xC8, 0xC9 -> update(md, relPc + ":brw" + op + ":" + (relPc + s4(code, pc + 1)) + ";");
+                    case 0xAA -> {
+                        int p = pc + 1 + ((4 - ((pc + 1) & 3)) & 3);
+                        int def = relPc + s4(code, p);
+                        int low = s4(code, p + 4);
+                        int high = s4(code, p + 8);
+                        update(md, relPc + ":tsw:" + def + ":" + low + ":" + high);
+                        int count = high - low + 1;
+                        for (int i = 0; i < count; i++) {
+                            update(md, "," + (relPc + s4(code, p + 12 + i * 4)));
+                        }
+                        update(md, ";");
+                    }
+                    case 0xAB -> {
+                        int p = pc + 1 + ((4 - ((pc + 1) & 3)) & 3);
+                        int def = relPc + s4(code, p);
+                        int npairs = s4(code, p + 4);
+                        update(md, relPc + ":lsw:" + def + ":" + npairs);
+                        for (int i = 0; i < npairs; i++) {
+                            update(md, "," + s4(code, p + 8 + i * 8) + "->" + (relPc + s4(code, p + 12 + i * 8)));
+                        }
+                        update(md, ";");
+                    }
+                    case 0xB2, 0xB3, 0xB4, 0xB5 -> {
+                        CpRef ref = (CpRef) cp[u2(code, pc + 1)];
+                        String owner = cpClass(cp, ref.classIdx);
+                        CpNat nat = (CpNat) cp[ref.natIdx];
+                        String name = cpUtf8(cp, nat.nameIdx);
+                        String desc = cpUtf8(cp, nat.descIdx);
+                        fields.add(new FieldKey(owner, name, desc));
+                        addDescriptorTypes(desc, types);
+                        update(md, relPc + ":f" + op + ":" + owner + "." + name + ":" + desc + ";");
+                    }
+                    case 0xB6, 0xB7, 0xB8, 0xB9 -> {
+                        CpRef ref = (CpRef) cp[u2(code, pc + 1)];
+                        String owner = cpClass(cp, ref.classIdx);
+                        CpNat nat = (CpNat) cp[ref.natIdx];
+                        String name = cpUtf8(cp, nat.nameIdx);
+                        String desc = cpUtf8(cp, nat.descIdx);
+                        calls.add(new MethodKey(owner, name, desc));
+                        addDescriptorTypes(desc, types);
+                        int normOp = (op == 0xB7 && owner.equals(thisClass) && !"<init>".equals(name)) ? 0xB6 : op;
+                        String normName = LAMBDA_METHOD.matcher(name).matches() ? "<lambda>" : name;
+                        update(md, relPc + ":m" + normOp + ":" + owner + "." + normName + desc + ";");
+                    }
+                    case 0xBA -> {
+                        CpIndy indy = (CpIndy) cp[u2(code, pc + 1)];
+                        CpNat nat = (CpNat) cp[indy.natIdx];
+                        String name = cpUtf8(cp, nat.nameIdx);
+                        String desc = cpUtf8(cp, nat.descIdx);
+                        addDescriptorTypes(desc, types);
+                        Bsm bsm = bsms.get(indy.bsmIdx);
+                        StringBuilder sb = new StringBuilder();
+                        sb.append(relPc).append(":indy:").append(name).append(desc).append(':')
+                                .append(cpSymbolic(cp, bsms, bsm.mhIdx, calls, fields, types)).append('[');
+                        for (int argIdx : bsm.args) {
+                            sb.append(cpSymbolic(cp, bsms, argIdx, calls, fields, types)).append(',');
+                        }
+                        sb.append("];");
+                        update(md, sb.toString());
+                    }
+                    case 0xBB, 0xBD, 0xC0, 0xC1 -> {
+                        String cls = cpClass(cp, u2(code, pc + 1));
+                        addInternalType(cls, types);
+                        update(md, relPc + ":t" + op + ":" + cls + ";");
+                    }
+                    case 0xC5 -> {
+                        String cls = cpClass(cp, u2(code, pc + 1));
+                        addInternalType(cls, types);
+                        update(md, relPc + ":multi:" + cls + ":" + (code[pc + 3] & 0xFF) + ";");
+                    }
+                    default -> {
+                        update(md, relPc + ":raw:");
+                        md.update(code, pc, len);
+                        update(md, ";");
+                    }
+                }
+                pc += len;
+            }
+            return new CodeDigest(hex(md), calls, fields, types);
+        }
+
+        static int instructionLength(byte[] code, int pc) throws IOException {
+            int op = code[pc] & 0xFF;
+            return switch (op) {
+                case 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
+                        0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29,
+                        0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35,
+                        0x3B, 0x3C, 0x3D, 0x3E, 0x3F, 0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4A,
+                        0x4B, 0x4C, 0x4D, 0x4E, 0x4F, 0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5A,
+                        0x5B, 0x5C, 0x5D, 0x5E, 0x5F, 0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6A,
+                        0x6B, 0x6C, 0x6D, 0x6E, 0x6F, 0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7A,
+                        0x7B, 0x7C, 0x7D, 0x7E, 0x7F, 0x80, 0x81, 0x82, 0x83,
+                        0x85, 0x86, 0x87, 0x88, 0x89, 0x8A, 0x8B, 0x8C, 0x8D, 0x8E, 0x8F, 0x90, 0x91, 0x92, 0x93, 0x94,
+                        0x95, 0x96, 0x97, 0x98, 0xAC, 0xAD, 0xAE, 0xAF, 0xB0, 0xB1, 0xBE, 0xBF, 0xC2, 0xC3 -> 1;
+                case 0x10, 0x12, 0x15, 0x16, 0x17, 0x18, 0x19, 0x36, 0x37, 0x38, 0x39, 0x3A, 0xA9, 0xBC -> 2;
+                case 0x11, 0x13, 0x14, 0x84, 0x99, 0x9A, 0x9B, 0x9C, 0x9D, 0x9E, 0x9F, 0xA0, 0xA1, 0xA2, 0xA3, 0xA4,
+                        0xA5, 0xA6, 0xA7, 0xA8, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7, 0xB8, 0xBB, 0xBD, 0xC0, 0xC1,
+                        0xC6, 0xC7 -> 3;
+                case 0xC5 -> 4;
+                case 0xB9, 0xBA, 0xC8, 0xC9 -> 5;
+                case 0xC4 -> (code[pc + 1] & 0xFF) == 0x84 ? 6 : 4;
+                case 0xAA -> {
+                    int pad = (4 - ((pc + 1) & 3)) & 3;
+                    int p = pc + 1 + pad;
+                    long count = (long) s4(code, p + 8) - (long) s4(code, p + 4) + 1L;
+                    yield 1 + pad + 12 + Math.toIntExact(count * 4L);
+                }
+                case 0xAB -> {
+                    int pad = (4 - ((pc + 1) & 3)) & 3;
+                    int p = pc + 1 + pad;
+                    long npairs = s4(code, p + 4);
+                    yield 1 + pad + 8 + Math.toIntExact(npairs * 8L);
+                }
+                default -> throw new IOException("unknown JVM opcode 0x" + Integer.toHexString(op));
+            };
+        }
+
+        static String cpSymbolic(Object[] cp, List<Bsm> bsms, int idx, List<MethodKey> calls, List<FieldKey> fields,
+                                 Set<String> types) throws IOException {
+            Object entry = cp[idx];
+            if (entry instanceof String s) {
+                return "U:" + s;
+            }
+            if (entry instanceof Integer n) {
+                return "I:" + n;
+            }
+            if (entry instanceof Long l) {
+                return "J:" + l;
+            }
+            if (entry instanceof CpString s) {
+                return "S:" + cpUtf8(cp, s.utf8Idx);
+            }
+            if (entry instanceof CpClass c) {
+                String cls = cpUtf8(cp, c.nameIdx);
+                addInternalType(cls, types);
+                return "C:" + cls;
+            }
+            if (entry instanceof CpMethodType mt) {
+                String desc = cpUtf8(cp, mt.descIdx);
+                addDescriptorTypes(desc, types);
+                return "MT:" + desc;
+            }
+            if (entry instanceof CpHandle mh) {
+                CpRef ref = (CpRef) cp[mh.refIdx];
+                String owner = cpClass(cp, ref.classIdx);
+                CpNat nat = (CpNat) cp[ref.natIdx];
+                String name = cpUtf8(cp, nat.nameIdx);
+                String desc = cpUtf8(cp, nat.descIdx);
+                addDescriptorTypes(desc, types);
+                if (mh.kind >= 1 && mh.kind <= 4) {
+                    fields.add(new FieldKey(owner, name, desc));
+                } else {
+                    calls.add(new MethodKey(owner, name, desc));
+                }
+                String normName = LAMBDA_METHOD.matcher(name).matches() ? "<lambda>" : name;
+                return "MH:" + mh.kind + ":" + owner + "." + normName + desc;
+            }
+            if (entry instanceof CpIndy dyn) {
+                CpNat nat = (CpNat) cp[dyn.natIdx];
+                Bsm bsm = bsms.get(dyn.bsmIdx);
+                StringBuilder sb = new StringBuilder("DYN:").append(cpUtf8(cp, nat.nameIdx))
+                        .append(cpUtf8(cp, nat.descIdx)).append(':')
+                        .append(cpSymbolic(cp, bsms, bsm.mhIdx, calls, fields, types)).append('[');
+                for (int a : bsm.args) {
+                    sb.append(cpSymbolic(cp, bsms, a, calls, fields, types)).append(',');
+                }
+                return sb.append(']').toString();
+            }
+            throw new IOException("unexpected constant pool entry at " + idx + ": " + entry);
+        }
+
+        static String cpConstValue(Object[] cp, int idx) throws IOException {
+            Object entry = cp[idx];
+            if (entry instanceof String || entry instanceof Integer || entry instanceof Long) {
+                return entry.toString();
+            }
+            if (entry instanceof CpString s) {
+                return cpUtf8(cp, s.utf8Idx);
+            }
+            if (entry instanceof CpClass c) {
+                return cpUtf8(cp, c.nameIdx);
+            }
+            throw new IOException("unexpected annotation constant at " + idx);
+        }
+
+        static String cpUtf8(Object[] cp, int idx) throws IOException {
+            if (idx > 0 && idx < cp.length && cp[idx] instanceof String s) {
+                return s;
+            }
+            throw new IOException("expected UTF-8 at cp[" + idx + "]");
+        }
+
+        static String cpClass(Object[] cp, int idx) throws IOException {
+            if (idx > 0 && idx < cp.length && cp[idx] instanceof CpClass c) {
+                return cpUtf8(cp, c.nameIdx);
+            }
+            throw new IOException("expected Class at cp[" + idx + "]");
+        }
+
+        static void addInternalType(String internal, Set<String> types) {
+            if (internal.startsWith("[")) {
+                addDescriptorTypes(internal, types);
+            } else {
+                types.add(internal);
+            }
+        }
+
+        static void addDescriptorTypes(String desc, Set<String> types) {
+            int i = 0;
+            while (i < desc.length()) {
+                if (desc.charAt(i) == 'L') {
+                    int semi = desc.indexOf(';', i + 1);
+                    if (semi > i + 1) {
+                        types.add(desc.substring(i + 1, semi));
+                        i = semi + 1;
+                        continue;
+                    }
+                }
+                i++;
+            }
+        }
+
+        static int u2(byte[] b, int off) {
+            return ((b[off] & 0xFF) << 8) | (b[off + 1] & 0xFF);
+        }
+
+        static int s2(byte[] b, int off) {
+            return (short) (((b[off] & 0xFF) << 8) | (b[off + 1] & 0xFF));
+        }
+
+        static int s4(byte[] b, int off) {
+            return ((b[off] & 0xFF) << 24) | ((b[off + 1] & 0xFF) << 16)
+                    | ((b[off + 2] & 0xFF) << 8) | (b[off + 3] & 0xFF);
+        }
+
+        static MessageDigest sha256() {
+            try {
+                return MessageDigest.getInstance("SHA-256");
+            } catch (NoSuchAlgorithmException impossible) {
+                throw new IllegalStateException(impossible);
+            }
+        }
+
+        static void update(MessageDigest md, String text) {
+            md.update(text.getBytes(StandardCharsets.UTF_8));
+        }
+
+        static String hex(MessageDigest md) {
+            return HexFormat.of().formatHex(md.digest());
         }
     }
 }

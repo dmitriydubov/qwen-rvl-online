@@ -857,8 +857,15 @@ CI на GitHub. Оттуда — правки ревизии 3: RUN_ERROR в `mu
   субъекта или получатель, которого B2 не знает (`this@withType.name`, `getDelegate().name`, `it['name']`,
   `(it as Test).name`, `"$name"`), в условии на имя внутри `withType(Test)` — напишите `getName()`, скобки,
   `when (name)` или просто `name`.
-- Glue (step-классы) — только в `src/acceptanceTest/java`. Правку glue в отдельном модуле или в общем source set
-  шагов область `changed` не видит: `gherkinMutation` проверит пустое множество.
+- Glue (step-классы) — только в `src/acceptanceTest/java`. При правке или добавлении `.java` в этом дереве `gherkinMutants`
+  компилирует базовую копию glue из `merge-base`, строит транзитивный граф байткода методов и полей против текущего glue
+  и сужает область мутаций до изменённых фич плюс фич, чьи сценарии в потоке `acceptanceTest` вызывали изменённые шаги,
+  хуки или `@ParameterType`; удаление файла glue, правка не-Java ресурсов приёмки, несобираемость базового glue против
+  нового `src/main` или изменение глобальной конфигурации контекста/хуков/трансформеров мутирует все фичи. После зелёного
+  `gherkinMutation` отпечаток входов (`build/gherkin-mutation/verified.sha256`) позволяет финальному `gauntlet` не гонять
+  повторно `gherkinMutantsRun`, если мутанты, classpath, скрипты сборки, конфиги и флаги не менялись (`gherkinMutants` и
+  `gherkinMutation` при этом исполняются всегда). Правку glue в отдельном модуле или в общем source set шагов область
+  `changed` не видит: `gherkinMutation` проверит пустое множество.
 - Transformer (`@ParameterType` и т. п.) читается из базовой копии класса. В multi-release JAR, где аннотация есть
   только в версионной копии, отвергнутое значение засчитается как kill. Glue набора — каталог классов, и в
   экосистеме Cucumber такие JAR не встречаются.

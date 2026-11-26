@@ -31,13 +31,69 @@ PAUSE_RE = re.compile(
 )
 
 
+def proc_descendants(root_pid):
+    children = {}
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return [root_pid]
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/stat", "r", encoding="utf-8", errors="replace") as f:
+                stat_text = f.read()
+            rparen = stat_text.rfind(")")
+            if rparen > 0:
+                ppid = int(stat_text[rparen + 2 :].split()[1])
+                children.setdefault(ppid, []).append(int(entry))
+        except (OSError, ValueError, IndexError):
+            continue
+    ordered, queue, seen = [], [root_pid], set()
+    while queue:
+        cur = queue.pop(0)
+        if cur in seen:
+            continue
+        seen.add(cur)
+        ordered.append(cur)
+        queue.extend(children.get(cur, ()))
+    return ordered
+
+
+def container_pids(cid):
+    try:
+        out = subprocess.check_output(
+            [DOCKER_BIN, "--host", f"unix://{UPSTREAM}", "top", cid, "-eo", "pid"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+        pids = [int(line.strip()) for line in out.splitlines()[1:] if line.strip().isdigit()]
+        if pids:
+            return pids
+    except Exception:
+        pass
+    try:
+        raw = subprocess.check_output(
+            [DOCKER_BIN, "--host", f"unix://{UPSTREAM}", "inspect", "--format", "{{.State.Pid}}", cid],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+        if raw.isdigit() and int(raw) > 0 and os.path.exists(f"/proc/{raw}"):
+            return proc_descendants(int(raw))
+    except Exception:
+        pass
+    return []
+
+
 def signal_container(cid, sig):
-    out = subprocess.check_output(
-        [DOCKER_BIN, "--host", f"unix://{UPSTREAM}", "top", cid, "-eo", "pid"], text=True
-    )
-    pids = [int(line.strip()) for line in out.splitlines()[1:] if line.strip().isdigit()]
+    pids = container_pids(cid)
     if not pids:
-        raise RuntimeError(f"no PIDs found for container {cid}")
+        sig_name = "SIGSTOP" if sig == signal.SIGSTOP else "SIGCONT"
+        subprocess.check_call(
+            [DOCKER_BIN, "--host", f"unix://{UPSTREAM}", "kill", f"--signal={sig_name}", cid],
+            stdout=subprocess.DEVNULL,
+        )
+        return
     signaled = 0
     for pid in pids:
         try:
