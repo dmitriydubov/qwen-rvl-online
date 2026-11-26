@@ -53,7 +53,7 @@ public class OneCQueue implements StandQueue {
 
     @Override
     public void purge() {
-        broker.execute(channel -> channel.queuePurge(queue));
+        StandQueues.drain(broker, queue);
     }
 
     void publish(byte[] body) {

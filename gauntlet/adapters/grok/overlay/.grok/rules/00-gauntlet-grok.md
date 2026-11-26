@@ -9,21 +9,24 @@ Build заменяет механизмы Claude Code, и задаёт прав�
 
 ## 0. Начало каждой сессии (сабагенты этот раздел пропускают)
 
-1. Первой командой выполни `cat "$(git rev-parse --git-path gauntlet-hook/grok-status.txt)"` и приведи эту
+1. Сессию Grok запускают из корня клона репозитория (`cd <repo> && grok`, папка добавлена в доверенные, иначе `.grok/hooks/gauntlet.json` не загрузится). Первой командой выполни `cat "$(git rev-parse --git-path gauntlet-hook/grok-status.txt)"` и приведи эту
    строку первым сообщением. Это строка статуса хуков набора: в Claude Code её печатает хук SessionStart, а вывод
    SessionStart в Grok до модели не доходит, поэтому прослойка набора пишет её в файл.
    - Файла нет или время в строке раньше начала этой сессии — хуки набора в этой сессии не работают (папка не
-     доверена, хуки выключены, Grok запущен не в той копии). Скажи об этом первым сообщением, выполни `printenv GAUNTLET_GUARD`
+     доверена, хуки выключены, Grok запущен вне корня клона). Скажи об этом первым сообщением, выполни `printenv GAUNTLET_GUARD`
      и **не останавливаясь** веди задачу по разделу 3 «Без хуков» (если `GAUNTLET_GUARD=off` — не правь набор до разрешения владельца).
    - В строке `guard: off` или `stop hook: off` — скажи об этом и не правь набор (раздел 1), пока владелец не
      разрешит.
 2. Текст `gauntlet/CLAUDE.md` должен быть у тебя в контексте целиком. Если его нет (ссылка не загрузилась) —
    прочитай файл сам от начала до конца, прежде чем что-то делать.
 3. Проверь готовность окружения и при необходимости настрой его сам без остановки на вопрос владельцу: `docker info`
-   (если Docker не установлен или демон не запущен — установи `docker.io` через `apt-get` / `sudo -n apt-get` при наличии
-   прав, подними `dockerd --host=unix:///var/run/docker.sock` в фоне и дождись `docker info`; при `CgroupDriver=none` /
-   `freezer not supported` на `docker pause` подними `nohup python3 -I -B gauntlet/hooks/docker_pause_shim.py /tmp/docker-pause-shim.sock >/tmp/docker-pause-shim.log 2>&1 &`,
-   перезапусти `./gradlew --stop` и передавай `DOCKER_HOST=unix:///tmp/docker-pause-shim.sock`; при падении
+   (на macOS проверь `PATH` `/opt/homebrew/bin:/usr/local/bin`, Colima и Lima — `limactl list` / `limactl start docker`,
+   `DOCKER_HOST=$(limactl list <vm> --format 'unix://{{.Dir}}/sock/docker.sock')` и при rootless Lima
+   `TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/run/user/<uid>/docker.sock` по `limactl shell <vm> id -u`; на Linux при отсутствии Docker и наличии прав установи `docker.io` через
+   `apt-get` / `sudo -n apt-get`, подними `dockerd --host=unix:///var/run/docker.sock` в фоне и дождись `docker info`; при
+   `CgroupDriver=none` / `freezer not supported` на `docker pause` подними `nohup python3 -I -B gauntlet/hooks/docker_pause_shim.py /tmp/docker-pause-shim.sock >/tmp/docker-pause-shim.log 2>&1 &`
+   и передавай `DOCKER_HOST=unix:///tmp/docker-pause-shim.sock`; **не вызывай `./gradlew --stop`**, если машина делит
+   `~/.gradle` с другими локальными клонами — это убьёт чужие идущие сборки; при падении
    `rabbitmq:*-alpine` на 2-vCPU VM с `OS monotonic time stepped backwards!` собери локальный образ с
    `ENV ERL_AFLAGS="+c false"` под тем же тегом без правки репозитория), нужную JDK из `gauntlet/config/gauntlet.properties`
    (`JAVA_HOME`, `GAUNTLET_GATE_JAVA_HOME`) и `ORG_GRADLE_PROJECT_publicRepositories=true`.
@@ -48,33 +51,32 @@ Build заменяет механизмы Claude Code, и задаёт прав�
 
 | В `gauntlet/CLAUDE.md` и ролях сказано | В Grok Build |
 |---|---|
-| сабагент `specifier`, `hardener`, `reviewer` | `spawn_subagent` с `subagent_type` = имя роли; тексты ролей — те же файлы `.claude/agents/*.md` |
+| сабагент `specifier`, `hardener`, `reviewer` | `spawn_subagent` (`description`: `"<роль>: <задача>"`, `prompt`: начинается с `[ROLE: <роль>]` и указания прочитать `.claude/agents/<роль>.md`, `cwd`: корень репозитория) |
 | «хук блокирует правки», guard по `agent_type` | тот же `gauntlet/hooks/guard.py` через прослойку `gauntlet/adapters/grok/grok_hooks.py` (`.grok/hooks/gauntlet.json`) |
 | Stop-хук гоняет `gauntletFast` | тот же `stop_gate.py` через прослойку (незакоммиченный черновик фич пропускает, а после коммита `spec:` запускает полный `gauntletFast`); Grok продлевает ход не больше 8 раз за ход |
-| SubagentStop-хук hardener'а (`.claude/settings.json`) | тот же хук в `.grok/hooks/gauntlet.json` |
+| SubagentStop-хук hardener'а (`.claude/settings.json`) | тот же хук `subagent-stop` в `.grok/hooks/gauntlet.json` (распознаёт роль по `subagentType`, `description` или `[ROLE: …]`) |
 | строка статуса SessionStart | файл `grok-status.txt` (раздел 0) |
-| Stop-хук облачной платформы Claude (`stop-hook-git-check.sh`) и переход шагов 3 → 4 → 5–8 | платформенного хука нет; после утверждения спецификации владельцем («да» / ответы шага 3) закоммить `spec:`, запушь ветку и **в этом же ходе без повторной остановки** выполни шаги 5–8 до PR |
+| Stop-хук облачной платформы Claude (`stop-hook-git-check.sh`) и переход шагов 3 → 4 → 5–8 | платформенного хука нет; после утверждения спецификации владельцем («да» / ответы шага 3) закоммить `spec:`, запушь ветку и **в этом же ходе без повторной остановки** выполни шаги 5–8 до PR (с промежуточным `git push origin HEAD` после шагов 5 и 7) |
 | строка «Ответ Claude Code на комментарий <ревьюер>» | «Ответ Grok Build на комментарий <ревьюер>», если владелец не решил иначе |
 
 Сабагенты в Grok:
-- `spawn_subagent` по умолчанию запускает сабагента в фоне и сразу возвращает его id. Результат роли, от которой
-  зависит следующий шаг процесса (specifier перед остановкой на утверждение, hardener перед ревью, reviewer перед
-  финалом), жди до конца: `wait_commands_or_subagents` с `mode: "wait_all"` (`wait_any` возвращает после первого
-  завершившегося) или `get_command_or_subagent_output` с `timeout_ms` больше нуля (не больше часа за вызов). Без
-  `timeout_ms` это снимок состояния, а не итог: снимок не пересказывай и не принимай. Ожидание вернулось, а сабагент
-  ещё работает — не убивай его, жди снова. Не заканчивай ход, пока твои сабагенты работают: Stop-хук набора вернёт
-  тебя (Grok продлевает ход не больше 8 раз; закончившийся ход он сам возобновит, когда сабагент завершится, — тогда
-  и принимай отчёт).
+- У `spawn_subagent` параметры `(prompt, description, cwd, background, resume_from)` (параметра `subagent_type` в CLI
+  нет — поэтому всегда начинай `description` с `"specifier: ..."`, `"hardener: ..."` или `"reviewer: ..."`, а `prompt` —
+  со строки `[ROLE: <роль>] Прочитай целиком .claude/agents/<роль>.md и выполни роль`).
+- Результат роли, от которой зависит следующий шаг процесса (specifier перед остановкой на утверждение, hardener перед
+  ревью, reviewer перед финалом), жди до конца через `get_command_or_subagent_output` с `timeout_ms` больше нуля (до
+  3 600 000 мс за вызов; при `background: false` вызов блокируется сам). Без `timeout_ms` это снимок состояния, а не
+  итог: снимок не пересказывай и не принимай. Ожидание вернулось, а сабагент ещё работает — не убивай его, жди снова.
 - Итог сабагента приходит в напоминании, обрезанный до 16 000 байт, с пометкой `[output truncated: … bytes shown]`.
   Увидел пометку — запроси полный вывод `get_command_or_subagent_output` с id сабагента, прежде чем пересказывать
   или принимать отчёт. Решение по обрезанному отчёту — нарушение правила тщательности.
-- Аргумент `model` у `spawn_subagent` не задавай, если владелец не просил: модели выбирает владелец.
 - Сабагент не порождает своих сабагентов.
 
 Длинные команды:
-- У команды переднего плана есть таймаут (по умолчанию 120 с, если владелец не поднял его в `~/.grok/config.toml`).
-  `./gradlew gauntletFast` и `./gradlew gauntlet` идут дольше: запускай их с достаточным `timeout` или в фоне и
-  дождись завершения. Прогон, оборванный таймаутом, не зелёный и не красный — он не прогнан; так и пиши.
+- У `run_terminal_command` ожидание задаёт `block_until_ms` (по умолчанию ~30 000 мс; `0` — сразу в фон).
+  `./gradlew gauntletFast` и `./gradlew gauntlet` идут дольше: передавай большой `block_until_ms` или запускай с
+  перенаправлением лога и жди завершения через `get_command_or_subagent_output` с `timeout_ms > 0`. Прогон, который ещё
+  идёт или оборван, не зелёный и не красный — дождись его конца.
 - Не заканчивай ход, пока идёт фоновый прогон Gradle: Stop-хук увидит его и вернёт тебя, а свой прогон он
   запускает в тот же `build/`.
 

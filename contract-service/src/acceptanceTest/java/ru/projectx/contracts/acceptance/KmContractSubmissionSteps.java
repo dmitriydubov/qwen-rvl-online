@@ -21,7 +21,7 @@ import tools.jackson.databind.JsonNode;
 
 public class KmContractSubmissionSteps {
 
-    private static final Duration PATIENCE = Duration.ofSeconds(10);
+    private static final Duration PATIENCE = Duration.ofMillis(1500);
     private static final String ABSENT = "нет";
     private static final String EMPTY_ARRAY = "[]";
     private static final String LINK_SEPARATOR = "/";

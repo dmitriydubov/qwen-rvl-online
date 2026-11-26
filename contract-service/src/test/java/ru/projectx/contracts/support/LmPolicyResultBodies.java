@@ -70,6 +70,11 @@ public final class LmPolicyResultBodies {
         return this;
     }
 
+    public LmPolicyResultBodies withDataJson(String name, String jsonValue) {
+        data().set(name, JSON.readTree(jsonValue));
+        return this;
+    }
+
     public LmPolicyResultBodies withoutDataField(String name) {
         data().remove(name);
         return this;

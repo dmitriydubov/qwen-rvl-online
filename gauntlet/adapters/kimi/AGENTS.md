@@ -16,11 +16,14 @@
    все страницы до конца (продолжай по `Next Read`), не выдержками. В первом сообщении — число строк (`wc -l
    gauntlet/CLAUDE.md`) и заголовки его разделов `##`: так владелец видит, что правила у тебя в контексте.
 3. Прочитай `gauntlet/config/gauntlet.properties`; если задан `module` — и настройки модуля в `gauntlet/config/<module>/`.
-4. Окружение и Docker — настрой сам без остановки на вопрос человеку: проверь `docker info` (если Docker не установлен или
-   демон не отвечает — при наличии прав установи `docker.io` через `apt-get` / `sudo -n apt-get`, подними
-   `dockerd --host=unix:///var/run/docker.sock` в фоне и дождись `docker info`; при `CgroupDriver=none` / `freezer not
-   supported` на `docker pause` подними `nohup python3 -I -B gauntlet/hooks/docker_pause_shim.py /tmp/docker-pause-shim.sock >/tmp/docker-pause-shim.log 2>&1 &`,
-   перезапусти `./gradlew --stop` и передавай `DOCKER_HOST=unix:///tmp/docker-pause-shim.sock`; при падении
+4. Окружение и Docker — настрой сам без остановки на вопрос человеку: проверь `docker info` (на macOS с Lima rootless
+   задай `DOCKER_HOST=$(limactl list <vm> --format 'unix://{{.Dir}}/sock/docker.sock')` и
+   `TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/run/user/<uid>/docker.sock`, где `<uid>` — из `limactl shell <vm> id -u`, без
+   `sudo`, и **не вызывай `./gradlew --stop`**, если машина делит `~/.gradle` с другими локальными клонами; на Linux если
+   Docker не установлен или демон не отвечает — при наличии прав установи `docker.io` через `apt-get` / `sudo -n apt-get`,
+   подними `dockerd --host=unix:///var/run/docker.sock` в фоне и дождись `docker info`; при `CgroupDriver=none` / `freezer not
+   supported` на `docker pause` подними `nohup python3 -I -B gauntlet/hooks/docker_pause_shim.py /tmp/docker-pause-shim.sock >/tmp/docker-pause-shim.log 2>&1 &`
+   и передавай `DOCKER_HOST=unix:///tmp/docker-pause-shim.sock`; при падении
    `rabbitmq:*-alpine` на 2-vCPU VM с `OS monotonic time stepped backwards!` собери локальный образ с
    `ENV ERL_AFLAGS="+c false"` под тем же тегом без правки репозитория), найди или установи JDK нужной версии (`project.java.version`, `gate.java.version` → экспортируй
    `JAVA_HOME`, `GAUNTLET_GATE_JAVA_HOME`) и задай `ORG_GRADLE_PROJECT_publicRepositories=true` (иначе сборка пойдёт в
@@ -37,7 +40,8 @@
 - Не ослабляй проверку ради зелёного: отключённые или условные тесты, assumptions, подавления, фильтры тестов,
   `enabled = false`, переконфигурация гейтов, удалённые или ослабленные assert'ы. Integrity и CI это ловят.
 - Фичи (Gherkin) пишет только specifier, утверждает только человек; после ответа «да» закоммить `spec:`, запушь ветку и
-  **в этом же ходе без повторной остановки** выполни шаги 5–8 до PR (с момента коммита `spec:` фичи заморожены).
+  **в этом же ходе без повторной остановки** выполни шаги 5–8 до PR (с промежуточным `git push origin HEAD` после шагов 5
+  и 7; с момента коммита `spec:` фичи заморожены).
 - TDD: падающий unit-тест → минимум кода → рефакторинг. Маленькие функции (CC ≤ 3, метод ≤ 25 строк, файл ≤ 300 строк,
   CRAP ≤ 8), SOLID, без антипаттернов. Секреты и ПДн — не в логах, фикстурах и текстах исключений.
 - Git: только новые коммиты в своей ветке, коммит заканчивается `By <role>.`; никаких `--amend`, `rebase`, `revert`,

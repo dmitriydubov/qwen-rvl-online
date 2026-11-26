@@ -32,6 +32,18 @@ class TaskCancellationParserTest {
     void commentIsOptional() {
         assertThat(parser.parse(TaskBodies.cancelled("EXPIRED").withoutDataField("cancel_comment").toJson())
                 .cancelComment()).isNull();
+        assertThat(parser.parse(TaskBodies.cancelled("EXPIRED").withDataJson("cancel_comment", "null").toJson())
+                .cancelComment()).isNull();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"987654", "true", "[\"Тестов-Узел\"]", "{\"note\":\"Тестов-Узел\"}"})
+    void nonStringComment_isViolationNamingTheField(String jsonValue) {
+        assertThatThrownBy(() -> parser.parse(
+                TaskBodies.cancelled("EXPIRED").withDataJson("cancel_comment", jsonValue).toJson()))
+                .isInstanceOf(ContractViolationException.class)
+                .hasMessage("недопустимое значение поля data.cancel_comment")
+                .hasNoCause();
     }
 
     @Test

@@ -31,9 +31,11 @@ public class OneCQueueSteps {
 
     @After
     public void restoreDeletedQueues() {
-        deleted.forEach(OneCQueue::declare);
-        deleted.forEach(queue -> consumers.restoreConsumerOf(queue.name()));
-        deleted.clear();
+        if (!deleted.isEmpty()) {
+            deleted.forEach(OneCQueue::declare);
+            deleted.forEach(queue -> consumers.restoreConsumerOf(queue.name()));
+            deleted.clear();
+        }
     }
 
     private OneCQueue oneC(String alias) {

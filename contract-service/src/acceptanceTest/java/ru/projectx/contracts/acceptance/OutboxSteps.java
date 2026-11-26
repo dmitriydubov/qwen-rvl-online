@@ -15,7 +15,7 @@ import ru.projectx.contracts.service.outbox.OutboxPublisher;
 
 public class OutboxSteps {
 
-    private static final Duration PATIENCE = Duration.ofSeconds(10);
+    private static final Duration PATIENCE = Duration.ofMillis(1500);
 
     private final OutboxRecords journal;
     private final StatusQueue queue;

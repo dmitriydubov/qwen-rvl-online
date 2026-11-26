@@ -257,10 +257,11 @@ public class GherkinMutator {
                 case "generate" -> generate(Path.of(opts.getOrDefault("--features", "src/acceptanceTest/resources/features")),
                         Path.of(opts.getOrDefault("--out", "build/gherkin-mutation/mutants")),
                         opts.containsKey("--only-file") ? pathList(Path.of(opts.get("--only-file"))) : null,
-                        optionalPath(opts, "--glue-impact"), out);
+                        optionalPath(opts, "--glue-impact"), optionalPath(opts, "--verified-cache"), out);
                 case "verdict" -> verdict(Path.of(opts.getOrDefault("--mutants", "build/gherkin-mutation/mutants")),
                         Path.of(opts.getOrDefault("--results", "build/gherkin-mutation/results")),
-                        glue(glue, opts.get("--glue-file")), optionalPath(opts, "--messages"), out);
+                        glue(glue, opts.get("--glue-file")), optionalPath(opts, "--messages"),
+                        optionalPath(opts, "--verified-cache"), out);
                 case "no-skipped" -> noSkipped(Path.of(opts.getOrDefault("--results", "build/test-results/acceptanceTest")),
                         optionalPath(opts, "--features"), new Census(optionalPath(opts, "--messages"),
                                 Path.of(opts.getOrDefault("--root", ".")), optionalPath(opts, "--allowlist")), out);
@@ -281,12 +282,23 @@ public class GherkinMutator {
 
     // ---------------------------------------------------------------- generate
 
+    record CachedFeature(String sha256, int mutants, int controls) {
+    }
+
+    record FeaturePlan(FeatureDoc doc, String key, String sha256, int mutants, int controls) {
+    }
+
     static int generate(Path featuresDir, Path outDir, List<String> only, PrintStream out) throws IOException {
-        return generate(featuresDir, outDir, only, null, out);
+        return generate(featuresDir, outDir, only, null, null, out);
     }
 
     static int generate(Path featuresDir, Path outDir, List<String> only, Path glueImpactFile, PrintStream out)
             throws IOException {
+        return generate(featuresDir, outDir, only, glueImpactFile, null, out);
+    }
+
+    static int generate(Path featuresDir, Path outDir, List<String> only, Path glueImpactFile, Path verifiedCacheFile,
+                        PrintStream out) throws IOException {
         deleteRecursively(outDir);
         Files.createDirectories(outDir);
         if (!Files.isDirectory(featuresDir)) {
@@ -319,8 +331,7 @@ public class GherkinMutator {
         if (glueImpactFile != null) {
             only = GlueImpact.narrow(files, only, pathList(glueImpactFile), out);
         }
-        List<Mutant> mutants = new ArrayList<>();
-        List<Control> controls = new ArrayList<>();
+        List<FeaturePlan> mutatablePlans = new ArrayList<>();
         int inScope = 0;
         int unreadable = 0;
         int vacuous = 0;
@@ -328,6 +339,7 @@ public class GherkinMutator {
             if (only != null && !matchesAny(file, only)) {
                 continue;
             }
+            byte[] rawBytes = Files.readAllBytes(file);
             List<String> lines = new ArrayList<>(Files.readAllLines(file, StandardCharsets.UTF_8));
             if (!lines.isEmpty() && lines.get(0).startsWith("\uFEFF")) {
                 lines.set(0, lines.get(0).substring(1));   // UTF-8 byte order mark
@@ -343,8 +355,9 @@ public class GherkinMutator {
                         + "'; supported: " + LANGUAGES.keySet() + " - add the keywords to GherkinMutator.LANGUAGES)");
                 continue;
             }
-            int before = mutants.size();
-            collectMutants(doc, mutants, controls);
+            List<Mutant> probeMutants = new ArrayList<>();
+            List<Control> probeControls = new ArrayList<>();
+            collectMutants(doc, probeMutants, probeControls);
             Keywords kw = LANGUAGES.get(doc.language);
             for (Scenario sc : doc.scenarios) {
                 if (stepCount(sc, kw) == 0) {
@@ -354,8 +367,8 @@ public class GherkinMutator {
                                                            // before prepending Background - so no step definition runs.
                 }
                 boolean checked = false;
-                for (int mi = before; mi < mutants.size(); mi++) {
-                    if (mutants.get(mi).scenario() == sc) {
+                for (Mutant m : probeMutants) {
+                    if (m.scenario() == sc) {
                         checked = true;
                         break;
                     }
@@ -366,6 +379,51 @@ public class GherkinMutator {
                             + " value to mutate - gherkinMutation cannot check its step definitions");
                 }
             }
+            if (!probeMutants.isEmpty()) {
+                mutatablePlans.add(new FeaturePlan(doc, tsv(doc.path), sha256Hex(rawBytes),
+                        probeMutants.size(), probeControls.size()));
+            }
+        }
+        Map<String, CachedFeature> cache = unreadable == 0 && vacuous == 0
+                ? readVerifiedCache(verifiedCacheFile)
+                : Map.of();
+        List<FeaturePlan> cachedPlans = new ArrayList<>();
+        List<FeaturePlan> emitPlans = new ArrayList<>();
+        for (FeaturePlan plan : mutatablePlans) {
+            CachedFeature hit = cache.get(plan.key());
+            if (hit != null && hit.sha256().equals(plan.sha256())) {
+                cachedPlans.add(plan);
+            } else {
+                emitPlans.add(plan);
+            }
+        }
+        if (!cachedPlans.isEmpty() && emitPlans.isEmpty()) {
+            int cachedMutants = cachedPlans.stream().mapToInt(FeaturePlan::mutants).sum();
+            int cachedControls = cachedPlans.stream().mapToInt(FeaturePlan::controls).sum();
+            Files.writeString(outDir.resolve("all-cached.tsv"),
+                    cachedMutants + "\t" + cachedControls + "\n", StandardCharsets.UTF_8);
+            Files.write(outDir.resolve("manifest.tsv"),
+                    List.of("id\tfeature\tline\tscenario\tkey\toriginal\tmutated\tuses"), StandardCharsets.UTF_8);
+            out.println("Gherkin mutation: verified cache matched all " + cachedPlans.size()
+                    + " feature file(s) in scope (" + cachedMutants + " mutant(s) + " + cachedControls
+                    + " control(s) already verified on current runtime) - 0 remaining");
+            return 0;
+        }
+        if (!cachedPlans.isEmpty()) {
+            int cachedMutants = cachedPlans.stream().mapToInt(FeaturePlan::mutants).sum();
+            int cachedControls = cachedPlans.stream().mapToInt(FeaturePlan::controls).sum();
+            out.println("Gherkin mutation: verified cache matched " + cachedPlans.size() + " of "
+                    + mutatablePlans.size() + " feature file(s) in scope (" + cachedMutants + " mutant(s) + "
+                    + cachedControls + " control(s) already verified on current runtime) - mutating "
+                    + emitPlans.size() + " remaining");
+        }
+        List<Mutant> mutants = new ArrayList<>();
+        List<Control> controls = new ArrayList<>();
+        List<String> featureDigests = new ArrayList<>();
+        for (FeaturePlan plan : emitPlans) {
+            collectMutants(plan.doc(), mutants, controls);
+            featureDigests.add(String.join("\t", plan.key(), plan.sha256(),
+                    String.valueOf(plan.mutants()), String.valueOf(plan.controls())));
         }
         List<String> manifest = new ArrayList<>();
         manifest.add("id\tfeature\tline\tscenario\tkey\toriginal\tmutated\tuses");
@@ -382,8 +440,19 @@ public class GherkinMutator {
                     tsv(c.scenario().name), CONTROL_KEY, "", "", ""));
         }
         Files.write(outDir.resolve("manifest.tsv"), manifest, StandardCharsets.UTF_8);
+        if (verifiedCacheFile != null) {
+            Path pending = Path.of(verifiedCacheFile + ".pending");
+            if (featureDigests.isEmpty()) {
+                Files.deleteIfExists(pending);
+            } else {
+                if (pending.getParent() != null) {
+                    Files.createDirectories(pending.getParent());
+                }
+                Files.write(pending, featureDigests, StandardCharsets.UTF_8);
+            }
+        }
         out.println("Gherkin mutation: " + mutants.size() + " mutant(s) + " + controls.size() + " control(s) from "
-                + inScope + " feature file(s) in scope -> " + outDir);
+                + (cachedPlans.isEmpty() ? inScope : emitPlans.size()) + " feature file(s) in scope -> " + outDir);
         if (vacuous > 0) {
             out.println("  Every value a scenario depends on must be an Examples parameter (Scenario Outline), so that");
             out.println("  a hollow step definition shows up as a surviving mutant. The specifier rewrites the feature;");
@@ -908,6 +977,11 @@ public class GherkinMutator {
     // ---------------------------------------------------------------- verdict
 
     static int verdict(Path mutantsDir, Path resultsDir, Glue glue, Path messages, PrintStream out) throws IOException {
+        return verdict(mutantsDir, resultsDir, glue, messages, null, out);
+    }
+
+    static int verdict(Path mutantsDir, Path resultsDir, Glue glue, Path messages, Path verifiedCacheFile,
+                       PrintStream out) throws IOException {
         Path manifestFile = mutantsDir.resolve("manifest.tsv");
         if (!Files.isRegularFile(manifestFile)) {
             out.println("Gherkin mutation: no manifest at " + manifestFile + " - nothing to judge.");
@@ -921,6 +995,16 @@ public class GherkinMutator {
             (CONTROL_ID.matcher(f[0]).matches() ? controls : manifest).put(f[0], f);
         }
         if (manifest.isEmpty()) {
+            Path allCached = mutantsDir.resolve("all-cached.tsv");
+            if (Files.isRegularFile(allCached)) {
+                String[] counts = Files.readString(allCached, StandardCharsets.UTF_8).trim().split("\t");
+                if (counts.length >= 2) {
+                    out.println("Gherkin mutation: " + counts[0] + " mutant(s) + " + counts[1]
+                            + " control(s) already verified on current runtime - OK");
+                    out.println("Gherkin mutation: OK");
+                    return 0;
+                }
+            }
             out.println("Gherkin mutation: no mutants (no Examples values in scope) - OK.");
             return 0;
         }
@@ -933,31 +1017,40 @@ public class GherkinMutator {
         int byOtherException = 0;
         List<String> survived = new ArrayList<>();
         List<String> errors = new ArrayList<>();
+        Set<String> failedFeatures = new HashSet<>();
         for (Map.Entry<String, String[]> e : manifest.entrySet()) {
             String[] f = e.getValue();
             String what = f[1] + ":" + f[2] + " \"" + f[3] + "\" " + f[4] + ": " + f[5] + " -> " + f[6];
             int uses = firstUseLine(f);
             Outcome o = combine(attempts.get(e.getKey()), attempt -> mutantVerdict(attempt, uses));
             if (o == null) {
+                failedFeatures.add(f[1]);
                 errors.add("MUTANT ERROR    " + e.getKey() + " not executed  " + what);
             } else if (o.kind().equals("passed")) {
+                failedFeatures.add(f[1]);
                 survived.add("MUTANT SURVIVED " + e.getKey() + "  " + what);
             } else if (o.kind().equals("aborted")) {
+                failedFeatures.add(f[1]);
                 errors.add("MUTANT ERROR    " + e.getKey() + " skipped/aborted, not a kill  " + what);
             } else if (o.kind().equals("error")) {
+                failedFeatures.add(f[1]);
                 errors.add("MUTANT ERROR    " + e.getKey() + " failed outside a step (" + thrown(o)
                         + " - hook, fixture or context), not a kill  " + what);
             } else if (o.kind().equals("inconsistent")) {
+                failedFeatures.add(f[1]);
                 errors.add("MUTANT ERROR    " + e.getKey() + " ran more than once with different results (a retry or a"
                         + " rerun) - the detection is not stable, not a kill  " + what);
             } else if (o.kind().equals("rejected")) {
+                failedFeatures.add(f[1]);
                 errors.add("MUTANT ERROR    " + e.getKey() + " the value never reached a step definition (" + thrown(o)
                         + ": Cucumber could not convert it, a transformer rejected it, the glue object failed or the step"
                         + " is ambiguous), not a kill  " + what);
             } else if (mutantVerdict(o, uses).equals("unused")) {
+                failedFeatures.add(f[1]);
                 errors.add("MUTANT ERROR    " + e.getKey() + " failed, but no step uses <" + f[4] + "> (the scenario title"
                         + " at most) - the changed value did not cause it, not a kill  " + what);
             } else if (mutantVerdict(o, uses).equals("early")) {
+                failedFeatures.add(f[1]);
                 errors.add("MUTANT ERROR    " + e.getKey() + " failed on line " + o.line() + ", before the first step that"
                         + " uses <" + f[4] + "> (line " + uses + ") - the changed value did not cause it, not a"
                         + " kill  " + what);
@@ -978,6 +1071,7 @@ public class GherkinMutator {
             if (o != null && o.kind().equals("passed")) {
                 controlsPassed++;
             } else {
+                failedFeatures.add(f[1]);
                 // "MUTANT ERROR" on purpose: the Stop hook hands lines with that prefix back to the agent
                 brokenControls.add("MUTANT ERROR    " + e.getKey() + " control (unmutated scenario"
                         + (e.getKey().startsWith("z") ? ", after the mutants" : "") + ") " + controlProblem(o)
@@ -986,6 +1080,9 @@ public class GherkinMutator {
         }
         if (messages != null) {
             order.addAll(runOrder(streams, manifest, controls, attempts));
+        }
+        if (verifiedCacheFile != null && order.isEmpty()) {
+            updateVerifiedCache(verifiedCacheFile, Path.of(verifiedCacheFile + ".pending"), failedFeatures);
         }
         out.println("Gherkin mutation: " + manifest.size() + " mutant(s) - " + killed + " killed"
                 + (byUndefinedStep > 0 ? " (" + byUndefinedStep + " only because no step definition matched the new value)" : "")
@@ -1030,6 +1127,63 @@ public class GherkinMutator {
             out.println("  file, a JVM argument provider, a doFirst or doLast of the project. Keep them off gherkinMutantsRun.");
         }
         return 1;
+    }
+
+    static String sha256Hex(byte[] bytes) {
+        MessageDigest md = GlueImpact.sha256();
+        md.update(bytes);
+        return GlueImpact.hex(md);
+    }
+
+    static Map<String, CachedFeature> readVerifiedCache(Path cacheFile) throws IOException {
+        Map<String, CachedFeature> map = new LinkedHashMap<>();
+        if (cacheFile == null || !Files.isRegularFile(cacheFile)) {
+            return map;
+        }
+        for (String line : Files.readAllLines(cacheFile, StandardCharsets.UTF_8)) {
+            if (line.isBlank() || line.startsWith("#")) {
+                continue;
+            }
+            String[] p = line.split("\t", -1);
+            if (p.length >= 4) {
+                try {
+                    map.put(p[0], new CachedFeature(p[1], Integer.parseInt(p[2]), Integer.parseInt(p[3])));
+                } catch (NumberFormatException ignored) {
+                    // ignore malformed entry
+                }
+            }
+        }
+        return map;
+    }
+
+    static void updateVerifiedCache(Path cacheFile, Path digestsFile, Set<String> failedFeatures) throws IOException {
+        if (!Files.isRegularFile(digestsFile)) {
+            return;
+        }
+        Map<String, CachedFeature> cache = readVerifiedCache(cacheFile);
+        for (String line : Files.readAllLines(digestsFile, StandardCharsets.UTF_8)) {
+            if (line.isBlank()) {
+                continue;
+            }
+            String[] p = line.split("\t", -1);
+            if (p.length >= 4) {
+                if (failedFeatures.contains(p[0])) {
+                    cache.remove(p[0]);
+                } else {
+                    cache.put(p[0], new CachedFeature(p[1], Integer.parseInt(p[2]), Integer.parseInt(p[3])));
+                }
+            }
+        }
+        if (cacheFile.getParent() != null) {
+            Files.createDirectories(cacheFile.getParent());
+        }
+        List<String> outLines = new ArrayList<>();
+        for (Map.Entry<String, CachedFeature> e : cache.entrySet()) {
+            CachedFeature v = e.getValue();
+            outLines.add(String.join("\t", e.getKey(), v.sha256(),
+                    String.valueOf(v.mutants()), String.valueOf(v.controls())));
+        }
+        Files.write(cacheFile, outLines, StandardCharsets.UTF_8);
     }
 
     // ---------------------------------------------------------------- run order (Cucumber's message stream)
@@ -1081,6 +1235,12 @@ public class GherkinMutator {
                         + recorded + " by the message stream - " + (recorded < reported
                         ? "the order of an attempt is unknown" : "the stream is not of the run the XML reports"));
             }
+        }
+        if (streams.size() > 1 && !errors.isEmpty()) {
+            List<String> streamNames = streams.stream().map(s -> s.name).toList();
+            errors.add(0, "MUTANT ERROR    run order: worker JVM restarted or split scenarios across "
+                    + streams.size() + " Cucumber message streams (" + String.join(", ", streamNames)
+                    + ") - check OutOfMemoryError / gherkin.maxHeapSize in gauntlet.properties, forkEvery, or maxParallelForks");
         }
         return errors;
     }

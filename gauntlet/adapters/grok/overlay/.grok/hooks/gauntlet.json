@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 -B \"$CLAUDE_PROJECT_DIR/gauntlet/adapters/grok/grok_hooks.py\" session-start",
+            "command": "python3 -I -B \"${CLAUDE_PROJECT_DIR:-${GROK_WORKSPACE_ROOT:-.}}/gauntlet/adapters/grok/grok_hooks.py\" session-start",
             "timeout": 180
           }
         ]
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 -B \"$CLAUDE_PROJECT_DIR/gauntlet/adapters/grok/grok_hooks.py\" guard",
+            "command": "python3 -I -B \"${CLAUDE_PROJECT_DIR:-${GROK_WORKSPACE_ROOT:-.}}/gauntlet/adapters/grok/grok_hooks.py\" guard",
             "timeout": 30,
             "failClosed": true
           }
@@ -29,7 +29,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 -B \"$CLAUDE_PROJECT_DIR/gauntlet/adapters/grok/grok_hooks.py\" stop --task gauntletFast --max-attempts 3 --timeout 1700",
+            "command": "python3 -I -B \"${CLAUDE_PROJECT_DIR:-${GROK_WORKSPACE_ROOT:-.}}/gauntlet/adapters/grok/grok_hooks.py\" stop --task gauntletFast --max-attempts 3 --timeout 1700",
             "timeout": 1800
           }
         ]
@@ -37,22 +37,12 @@
     ],
     "SubagentStop": [
       {
-        "matcher": "^hardener$",
+        "matcher": "^(hardener|reviewer|gauntlet-card-[a-z0-9-]+|general-purpose)$",
         "hooks": [
           {
             "type": "command",
-            "command": "python3 -B \"$CLAUDE_PROJECT_DIR/gauntlet/adapters/grok/grok_hooks.py\" stop --task mutationGate --max-attempts 2 --timeout 3300",
+            "command": "python3 -I -B \"${CLAUDE_PROJECT_DIR:-${GROK_WORKSPACE_ROOT:-.}}/gauntlet/adapters/grok/grok_hooks.py\" subagent-stop",
             "timeout": 7200
-          }
-        ]
-      },
-      {
-        "matcher": "^(reviewer|gauntlet-card-[a-z0-9-]+)$",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 -B \"$CLAUDE_PROJECT_DIR/gauntlet/adapters/grok/grok_hooks.py\" report",
-            "timeout": 30
           }
         ]
       }

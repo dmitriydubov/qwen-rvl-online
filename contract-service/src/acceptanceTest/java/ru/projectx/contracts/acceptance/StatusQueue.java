@@ -17,6 +17,7 @@ public class StatusQueue implements StandQueue {
 
     private final RabbitTemplate broker;
     private final String queue;
+    private boolean declared;
 
     StatusQueue(ConnectionFactory connections, String queue) {
         this.broker = new RabbitTemplate(connections);
@@ -42,16 +43,20 @@ public class StatusQueue implements StandQueue {
     }
 
     void declare() {
-        broker.execute(channel -> channel.queueDeclare(queue, DURABLE, EXCLUSIVE, AUTO_DELETE, null));
+        if (!declared) {
+            broker.execute(channel -> channel.queueDeclare(queue, DURABLE, EXCLUSIVE, AUTO_DELETE, null));
+            declared = true;
+        }
     }
 
     void delete() {
         broker.execute(channel -> channel.queueDelete(queue));
+        declared = false;
     }
 
     @Override
     public void purge() {
-        broker.execute(channel -> channel.queuePurge(queue));
+        StandQueues.drain(broker, queue);
     }
 
     @Override

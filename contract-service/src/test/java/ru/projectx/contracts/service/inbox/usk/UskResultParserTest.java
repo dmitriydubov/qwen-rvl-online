@@ -59,13 +59,36 @@ class UskResultParserTest {
         }
 
         @Test
-        void uskNumberAndFileSize_mayBeAbsent() {
-            UskResult.Issued result = (UskResult.Issued) parser.parse(LmPolicyResultBodies.issued()
+        void uskNumberAndFileSize_mayBeAbsentOrNull() {
+            UskResult.Issued absent = (UskResult.Issued) parser.parse(LmPolicyResultBodies.issued()
                     .withoutDataField("policy_usk_number").withoutDocumentField(0, "file_size").toJson());
+            UskResult.Issued explicitNull = (UskResult.Issued) parser.parse(LmPolicyResultBodies.issued()
+                    .withDataJson("policy_usk_number", "null").toJson());
 
-            assertThat(result.uskNumber()).isNull();
-            assertThat(result.documents()).containsExactly(new IssuedDocument("POLICY", LmPolicyResultBodies.FILE_URL,
+            assertThat(absent.uskNumber()).isNull();
+            assertThat(absent.documents()).containsExactly(new IssuedDocument("POLICY", LmPolicyResultBodies.FILE_URL,
                     null));
+            assertThat(explicitNull.uskNumber()).isNull();
+        }
+
+        @ParameterizedTest
+        @ValueSource(strings = {"987654", "true", "[\"Тестов-Узел\"]", "{\"note\":\"Тестов-Узел\"}"})
+        void nonStringUskNumberWhenIssued_isViolationNamingTheField(String jsonValue) {
+            assertThatThrownBy(() -> parser.parse(LmPolicyResultBodies.issued()
+                    .withDataJson("policy_usk_number", jsonValue).toJson()))
+                    .isInstanceOf(ContractViolationException.class)
+                    .hasMessage("недопустимое значение поля data.policy_usk_number")
+                    .hasNoCause();
+        }
+
+        @ParameterizedTest
+        @ValueSource(strings = {"987654", "true", "[\"Тестов-Узел\"]", "{\"note\":\"Тестов-Узел\"}"})
+        void nonStringUskNumberWhenFailed_isIgnored(String jsonValue) {
+            UskResult result = parser.parse(LmPolicyResultBodies.failed()
+                    .withDataJson("policy_usk_number", jsonValue).toJson());
+
+            assertThat(result).isEqualTo(new UskResult.Failed(UUID.fromString(LmPolicyResultBodies.POLICY_ID),
+                    "INSURED_NOT_COVERED", "Стенд: застрахованный не входит в корпоративный договор"));
         }
 
         @Test

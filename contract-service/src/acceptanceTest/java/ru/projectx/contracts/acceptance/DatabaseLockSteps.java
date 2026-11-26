@@ -26,18 +26,20 @@ public class DatabaseLockSteps {
             "полис ЛМ", "lm_policies");
 
     private final IssuanceRecords records;
-
     private final DataSource dataSource;
+    private final StandFaults faults;
     private @Nullable Connection lockingSession;
 
-    public DatabaseLockSteps(DataSource dataSource, IssuanceRecords records) {
+    public DatabaseLockSteps(DataSource dataSource, IssuanceRecords records, StandFaults faults) {
         this.dataSource = dataSource;
         this.records = records;
+        this.faults = faults;
     }
 
     @Дано("данные {string} в базе Договоров заблокированы долгой операцией")
     public void dataLocked(String data) throws SQLException {
         assertThat(TABLES).as("данные, которые умеет блокировать шаг").containsKey(data);
+        faults.markDatabaseOrLeadershipDisturbed();
         Connection session = dataSource.getConnection();
         lockingSession = session;
         session.setAutoCommit(false);
@@ -49,6 +51,7 @@ public class DatabaseLockSteps {
     @Дано("запись о выпуске участника {string} заявки {string} в базе Договоров заблокирована долгой операцией")
     public void recordLocked(String participantId, String requestId) throws SQLException {
         IssuanceRecords.Record record = records.of(participantId, requestId).getLast();
+        faults.markDatabaseOrLeadershipDisturbed();
         Connection session = dataSource.getConnection();
         lockingSession = session;
         session.setAutoCommit(false);

@@ -46,7 +46,7 @@ public class DocumentFixQueue implements StandQueue {
 
     @Override
     public void purge() {
-        broker.execute(channel -> channel.queuePurge(NAME));
+        StandQueues.drain(broker, NAME);
     }
 
     void declare() {

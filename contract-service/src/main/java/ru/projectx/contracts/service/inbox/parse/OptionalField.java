@@ -9,15 +9,15 @@ import tools.jackson.databind.JsonNode;
 public record OptionalField(JsonField field) {
 
     public @Nullable String text() {
-        return isText() ? field.text() : null;
+        return field.isAbsent() ? null : field.text();
     }
 
     public @Nullable UUID uuid() {
-        return isText() ? field.uuid() : null;
+        return field.isAbsent() ? null : field.uuid();
     }
 
     public @Nullable LocalDate date() {
-        return isText() ? field.date() : null;
+        return field.isAbsent() ? null : field.date();
     }
 
     public @Nullable Long longInteger() {
@@ -28,10 +28,6 @@ public record OptionalField(JsonField field) {
             throw ContractViolationException.invalidValue(field.path());
         }
         return field.value().longValue();
-    }
-
-    private boolean isText() {
-        return field.value().isString();
     }
 
     private boolean notLong() {

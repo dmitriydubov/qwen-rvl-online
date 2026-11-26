@@ -100,6 +100,11 @@ public final class TaskBodies {
         return this;
     }
 
+    public TaskBodies withDataJson(String name, String jsonValue) {
+        ((ObjectNode) root.get("data")).set(name, JSON.readTree(jsonValue));
+        return this;
+    }
+
     public TaskBodies withoutDataField(String name) {
         ((ObjectNode) root.get("data")).remove(name);
         return this;
@@ -125,14 +130,24 @@ public final class TaskBodies {
         return this;
     }
 
+    public TaskBodies withParticipantJson(int index, String path, String jsonValue) {
+        String[] names = path.split("\\.");
+        parentOf(index, names).set(names[names.length - 1], JSON.readTree(jsonValue));
+        return this;
+    }
+
     public TaskBodies withoutParticipantField(int index, String path) {
         String[] names = path.split("\\.");
+        parentOf(index, names).remove(names[names.length - 1]);
+        return this;
+    }
+
+    private ObjectNode parentOf(int index, String[] names) {
         ObjectNode node = participant(index);
         for (int i = 0; i < names.length - 1; i++) {
             node = (ObjectNode) node.get(names[i]);
         }
-        node.remove(names[names.length - 1]);
-        return this;
+        return node;
     }
 
     private ObjectNode participant(int index) {

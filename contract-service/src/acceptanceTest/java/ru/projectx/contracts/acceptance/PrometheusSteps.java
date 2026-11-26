@@ -20,10 +20,10 @@ import org.springframework.boot.test.web.server.LocalManagementPort;
 public class PrometheusSteps {
 
     private static final Duration TIMEOUT = Duration.ofSeconds(10);
+    private static final HttpClient HTTP = HttpClient.newBuilder().connectTimeout(TIMEOUT).build();
     private static final Path OPERATIONS = Path.of("docs", "operations.md");
     private static final Pattern DOCUMENTED_EVENT_TYPE = Pattern.compile("`([A-Z][a-z][A-Za-z]*)`");
 
-    private final HttpClient http = HttpClient.newBuilder().connectTimeout(TIMEOUT).build();
     private final URI scrape;
     private String beforeScenario = "";
 
@@ -122,7 +122,7 @@ public class PrometheusSteps {
 
     private String scrape() throws IOException, InterruptedException {
         HttpRequest request = HttpRequest.newBuilder(scrape).timeout(TIMEOUT).GET().build();
-        HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
+        HttpResponse<String> response = HTTP.send(request, HttpResponse.BodyHandlers.ofString());
         assertThat(response.statusCode()).as("ответ /actuator/prometheus").isEqualTo(200);
         return response.body();
     }

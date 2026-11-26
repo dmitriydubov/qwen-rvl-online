@@ -112,6 +112,40 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
+      # Shared GitHub Actions runner egress IPs periodically hit HTTP 429 Too Many Requests on repo.maven.apache.org.
+      # Rewrite Maven Central repository URLs to Google's official Maven Central GCS mirror via a user init script,
+      # leaving corporate registry settings, Gradle Plugin Portal, and custom repositories untouched.
+      - name: Configure Maven Central GCS mirror
+        run: |
+          init_dir="${GRADLE_USER_HOME:-$HOME/.gradle}/init.d"
+          mkdir -p "$init_dir"
+          cat > "$init_dir/gauntlet-maven-central-mirror.init.gradle" <<'EOF'
+          def gcsMirror = URI.create('https://maven-central.storage-download.googleapis.com/maven2/')
+          def isCentral = { ArtifactRepository repo ->
+              repo instanceof MavenArtifactRepository &&
+                      repo.url.toString().replaceAll('/+$', '') in [
+                              'https://repo.maven.apache.org/maven2',
+                              'https://repo1.maven.org/maven2'
+                      ]
+          }
+          gradle.beforeSettings { Settings settings ->
+              settings.pluginManagement.repositories.all { ArtifactRepository repo ->
+                  if (isCentral(repo)) { repo.url = gcsMirror }
+              }
+              settings.dependencyResolutionManagement.repositories.all { ArtifactRepository repo ->
+                  if (isCentral(repo)) { repo.url = gcsMirror }
+              }
+          }
+          gradle.allprojects { Project p ->
+              p.buildscript.repositories.all { ArtifactRepository repo ->
+                  if (isCentral(repo)) { repo.url = gcsMirror }
+              }
+              p.repositories.all { ArtifactRepository repo ->
+                  if (isCentral(repo)) { repo.url = gcsMirror }
+              }
+          }
+          EOF
+
       - name: Resolve the base branch
         id: base
         env:

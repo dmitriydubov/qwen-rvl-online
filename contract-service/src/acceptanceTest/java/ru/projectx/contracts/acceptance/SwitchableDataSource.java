@@ -20,6 +20,10 @@ final class SwitchableDataSource extends DelegatingDataSource {
         failingSqlState = sqlState;
     }
 
+    boolean failing() {
+        return failingSqlState != null;
+    }
+
     void restore() {
         failingSqlState = null;
     }

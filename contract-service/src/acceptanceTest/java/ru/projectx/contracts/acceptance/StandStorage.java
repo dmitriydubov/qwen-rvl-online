@@ -122,6 +122,10 @@ final class StandStorage {
         state = State.PAUSED;
     }
 
+    boolean disrupted() {
+        return state != State.RUNNING;
+    }
+
     void recover() {
         switch (state) {
             case STOPPED -> docker().startContainerCmd(container.getContainerId()).exec();

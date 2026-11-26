@@ -30,10 +30,15 @@ public class LeaderLockStand {
 
     private final JdbcClient jdbc;
     private final LeaderLock lock;
+    private boolean heldByOther;
 
     public LeaderLockStand(StandDatabase database, LeaderLock lock) {
         this.jdbc = database.jdbc();
         this.lock = lock;
+    }
+
+    boolean heldByOther() {
+        return heldByOther;
     }
 
     void takeOver() {
@@ -45,6 +50,7 @@ public class LeaderLockStand {
                 .param("now", now)
                 .param("expires", now.plus(HELD_FOR))
                 .update();
+        heldByOther = true;
     }
 
     void expire() {
@@ -62,6 +68,7 @@ public class LeaderLockStand {
                 .param("key", lock.key())
                 .param("other", OTHER_INSTANCE)
                 .update();
+        heldByOther = false;
     }
 
     private static LocalDateTime now() {

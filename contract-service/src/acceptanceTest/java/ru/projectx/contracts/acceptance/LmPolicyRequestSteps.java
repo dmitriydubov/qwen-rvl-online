@@ -15,7 +15,7 @@ import tools.jackson.databind.JsonNode;
 
 public class LmPolicyRequestSteps {
 
-    private static final Duration PATIENCE = Duration.ofSeconds(10);
+    private static final Duration PATIENCE = Duration.ofMillis(1500);
     private static final String ABSENT = "нет";
 
     private final LmPolicyRequestScheduler scheduler;

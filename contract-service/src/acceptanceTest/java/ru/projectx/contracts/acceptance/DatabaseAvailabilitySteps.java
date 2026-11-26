@@ -22,9 +22,10 @@ public class DatabaseAvailabilitySteps {
     private final InboxConsumerPause pause;
     private final BackgroundLeadership leadership;
     private final ConsumedQueues consumers;
+    private final StandFaults faults;
 
     public DatabaseAvailabilitySteps(DataSource dataSource, LeaderLockConnections leaderLock, InboxConsumerPause pause,
-            BackgroundLeadership leadership, ConsumedQueues consumers) {
+            BackgroundLeadership leadership, ConsumedQueues consumers, StandFaults faults) {
         assertThat(dataSource).as("пул соединений стенда с выключателем").isInstanceOf(SwitchableDataSource.class);
         assertThat(leaderLock).as("пул блокировки ведущего с выключателем")
                 .isInstanceOf(SwitchableLeaderLockConnections.class);
@@ -32,10 +33,12 @@ public class DatabaseAvailabilitySteps {
         this.pause = pause;
         this.leadership = leadership;
         this.consumers = consumers;
+        this.faults = faults;
     }
 
     @Дано("каждое соединение с базой Договоров отказывает с SQLSTATE {string}")
     public void connectionsFail(String sqlState) {
+        faults.markDatabaseOrLeadershipDisturbed();
         pools.forEach(pool -> pool.failConnectionsWith(sqlState));
     }
 
@@ -55,7 +58,9 @@ public class DatabaseAvailabilitySteps {
 
     @After(order = AFTER_LOCK_RELEASE)
     public void restoreAndResume() {
-        connectionsRestored();
-        storageChecked();
+        if (faults.databaseOrLeadershipDisturbed() || !pause.paused().isEmpty()) {
+            connectionsRestored();
+            storageChecked();
+        }
     }
 }

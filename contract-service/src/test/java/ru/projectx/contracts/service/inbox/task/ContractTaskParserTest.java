@@ -8,6 +8,7 @@ import java.time.LocalDate;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import ru.projectx.contracts.exception.ContractViolationException;
 import ru.projectx.contracts.message.task.ContractTask;
@@ -63,6 +64,50 @@ class ContractTaskParserTest {
         assertThat(person.document().issuedBy()).isNull();
         assertThat(person.document().issuedAt()).isNull();
         assertThat(person.document().divisionCode()).isNull();
+    }
+
+    @Test
+    void optionalParticipantFields_mayBeNull() {
+        TaskBodies body = TaskBodies.upserted()
+                .withParticipantJson(0, "program_id", "null")
+                .withParticipantJson(0, "personal_data.middle_name", "null")
+                .withParticipantJson(0, "personal_data.relation_type", "null")
+                .withParticipantJson(0, "personal_data.address", "null")
+                .withParticipantJson(0, "personal_data.document.series", "null")
+                .withParticipantJson(0, "personal_data.document.issued_by", "null")
+                .withParticipantJson(0, "personal_data.document.issued_at", "null")
+                .withParticipantJson(0, "personal_data.document.division_code", "null");
+
+        TaskParticipant participant = parser.parse(body.toJson()).participants().get(0);
+
+        assertThat(participant.programId()).isNull();
+        assertThat(participant.person().middleName()).isNull();
+        assertThat(participant.person().relationType()).isNull();
+        assertThat(participant.person().address()).isNull();
+        assertThat(participant.person().document().series()).isNull();
+        assertThat(participant.person().document().issuedBy()).isNull();
+        assertThat(participant.person().document().issuedAt()).isNull();
+        assertThat(participant.person().document().divisionCode()).isNull();
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+            "program_id | 987654",
+            "personal_data.middle_name | true",
+            "personal_data.relation_type | [\"Тестов-Узел\"]",
+            "personal_data.address | {\"note\":\"Тестов-Узел\"}",
+            "personal_data.document.series | 4510",
+            "personal_data.document.issued_by | false",
+            "personal_data.document.issued_at | [\"2010-04-20\"]",
+            "personal_data.document.division_code | {\"code\":\"770-001\"}"
+    })
+    void nonStringOptionalParticipantField_isViolationNamingTheFullPath(String field, String jsonValue) {
+        TaskBodies body = TaskBodies.upserted().withParticipantJson(0, field, jsonValue);
+
+        assertThatThrownBy(() -> parser.parse(body.toJson()))
+                .isInstanceOf(ContractViolationException.class)
+                .hasMessage("недопустимое значение поля data.participants[0]." + field)
+                .hasNoCause();
     }
 
     @ParameterizedTest

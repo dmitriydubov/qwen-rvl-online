@@ -34,10 +34,11 @@ public class LeadershipSteps {
     private final Clock clock;
     private final BackgroundLeadership leadership;
     private final ConsumedQueues consumers;
+    private final StandFaults faults;
 
     public LeadershipSteps(LeaderLockStand stand, TaskMessages messages, TaskQueue queue, PublishedMessages published,
             InboxMessageRepository inbox, PlatformTransactionManager transactions, Clock clock,
-            BackgroundLeadership leadership, ConsumedQueues consumers) {
+            BackgroundLeadership leadership, ConsumedQueues consumers, StandFaults faults) {
         this.stand = stand;
         this.messages = messages;
         this.queue = queue;
@@ -47,26 +48,31 @@ public class LeadershipSteps {
         this.clock = clock;
         this.leadership = leadership;
         this.consumers = consumers;
+        this.faults = faults;
     }
 
     @Дано("другой экземпляр Договоров перехватил роль ведущего")
     public void otherInstanceTookOver() {
+        faults.markDatabaseOrLeadershipDisturbed();
         stand.takeOver();
     }
 
     @Когда("другой экземпляр Договоров остановился")
     public void otherInstanceStopped() {
+        faults.markDatabaseOrLeadershipDisturbed();
         stand.release();
     }
 
     @Когда("срок блокировки погибшего экземпляра истёк")
     public void deadInstanceLockExpired() {
+        faults.markDatabaseOrLeadershipDisturbed();
         stand.expire();
     }
 
     @Когда("другой экземпляр Договоров записал в журнал входящих задачу на выпуск {string} по заявке {string} версии {int} и погиб, не подтвердив её брокеру:")
     public void otherInstanceStoredAndDied(String messageId, String requestId, int version,
             List<Map<String, String>> participants) {
+        faults.markDatabaseOrLeadershipDisturbed();
         byte[] body = messages.bytes(messages.upserted(messageId, requestId, version, participants));
         InboxReceipt receipt = new InboxReceipt(UUID.fromString(messageId), UUID.fromString(requestId), TASK_TOPIC,
                 TASK_EVENT, version);
@@ -79,8 +85,11 @@ public class LeadershipSteps {
 
     @After(order = AFTER_DATABASE_RESTORED)
     public void thisInstanceLeadsAgain() {
-        stand.release();
-        await().atMost(ROLE_TIMEOUT).until(leadership::leader);
-        consumers.awaitEveryConsumer();
+        if (faults.databaseOrLeadershipDisturbed() || stand.heldByOther() || !leadership.leader()) {
+            stand.release();
+            await().atMost(ROLE_TIMEOUT).until(leadership::leader);
+            consumers.awaitEveryConsumer();
+            faults.clearDatabaseOrLeadershipDisturbed();
+        }
     }
 }

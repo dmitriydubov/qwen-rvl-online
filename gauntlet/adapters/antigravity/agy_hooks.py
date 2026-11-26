@@ -38,7 +38,10 @@ import sys
 import urllib.parse
 import urllib.request
 
+sys.dont_write_bytecode = True
+
 HERE = os.path.dirname(os.path.realpath(__file__))
+REPO_ROOT = os.path.realpath(os.path.join(HERE, "..", "..", ".."))
 KIT_HOOKS = os.path.realpath(os.path.join(HERE, "..", "..", "hooks"))
 # The harness's own configuration is human-owned like .claude/ and CLAUDE.md: rules, agents, hooks, settings.
 EXTRA_OWNED = (".agents/", ".gemini/", "GEMINI.md", "AGENTS.md")
@@ -55,7 +58,7 @@ def main(argv):
         return answer({})
     command, rest = argv[0], argv[1:]
     if command == "selftest":
-        return selftest(rest[0] if rest else os.getcwd())
+        return selftest(rest[0] if rest else REPO_ROOT)
     event = read_event()
     project = project_of(event)
     try:
@@ -88,9 +91,24 @@ def option(args, name, default):
     return args[args.index(name) + 1] if name in args and args.index(name) + 1 < len(args) else default
 
 
+def has_gauntlet_kit(path):
+    return bool(path) and os.path.isfile(os.path.join(path, "gauntlet", "config", "gauntlet.properties"))
+
+
 def project_of(event):
-    paths = event.get("workspacePaths") or []
-    return (paths[0] if paths and isinstance(paths[0], str) else None) or event.get("cwd") or os.getcwd()
+    """Find the guarded repository root even in multi-workspace remote VMs where workspacePaths[0] and cwd are $HOME."""
+    raw_paths = [plain_path(p) for p in (event.get("workspacePaths") or []) if isinstance(p, str) and p]
+    candidates = list(raw_paths)
+    for extra in (event.get("cwd"), os.getcwd(), REPO_ROOT):
+        if isinstance(extra, str) and extra:
+            candidates.append(plain_path(extra))
+    for cand in candidates:
+        real = os.path.realpath(cand)
+        if has_gauntlet_kit(real):
+            return real
+    if has_gauntlet_kit(REPO_ROOT):
+        return REPO_ROOT
+    return (raw_paths[0] if raw_paths else None) or plain_path(event.get("cwd") or os.getcwd())
 
 
 def tool_args(event):
@@ -219,7 +237,7 @@ def stop(event, project, args):
         at = args.index("--agent")
         args = args[:at] + args[at + 2:]
     kit_event = {"hook_event_name": "Stop", "session_id": event.get("conversationId") or "agy", "cwd": project,
-                 "stop_hook_active": bool(event.get("continuation_active"))}
+                 "stop_hook_active": bool(event.get("continuation_active") or event.get("stopHookActive"))}
     if agent:
         # A role's own Stop hook (the hardener's mutationGate) is the kit's SubagentStop. agy fires the workspace
         # Stop hook for the subagent's conversation as well (#1527): without its own agent_id the two hooks would
@@ -227,7 +245,8 @@ def stop(event, project, args):
         # mutationGate run be skipped (and the other way round).
         kit_event.update(hook_event_name="SubagentStop", agent_id=agent, agent_type=agent)
     env = dict(os.environ, CLAUDE_PROJECT_DIR=project)
-    proc = subprocess.run([sys.executable, "-I", os.path.join(KIT_HOOKS, "stop_gate.py")] + args,
+    env.setdefault("ORG_GRADLE_PROJECT_publicRepositories", "true")
+    proc = subprocess.run([sys.executable, "-I", "-B", os.path.join(KIT_HOOKS, "stop_gate.py")] + args,
                           input=json.dumps(kit_event), capture_output=True, text=True, env=env, cwd=project)
     if proc.returncode == 2:
         return {"decision": "continue", "reason": proc.stderr.strip() or "[gauntlet] the gate is RED: fix it."}
@@ -268,13 +287,13 @@ def session_start(event, project):
     kit_event = {"hook_event_name": "SessionStart", "session_id": event.get("conversationId") or "agy",
                  "cwd": project, "source": "startup"}
     env = dict(os.environ, CLAUDE_PROJECT_DIR=project)
+    env.setdefault("ORG_GRADLE_PROJECT_publicRepositories", "true")
     proc = subprocess.run(["bash", os.path.join(KIT_HOOKS, "session_start.sh")], input=json.dumps(kit_event),
                           capture_output=True, text=True, env=env, cwd=project, timeout=170)
     status = (proc.stdout or "").strip() or "[gauntlet] SessionStart printed nothing"
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    # Whether agy hands SessionStart output to the agent is not confirmed: the agent reads this file instead.
     keep(project, STATUS_FILE, f"{status}\nwritten: {stamp}; conversation: {kit_event['session_id']}")
-    return {}
+    return {"injectSteps": [{"systemMessage": {"systemMessage": status}}]}
 
 
 # ----------------------------------------------------------------------------- selftest
@@ -290,11 +309,14 @@ def selftest(project):
     ctx = guard.Context(project)
     if not hasattr(ctx, "features_dirs") or not hasattr(type(ctx), "frozen"):
         failures.append("guard.Context has no features_dirs/frozen: the shared role cannot be built")
+    multi_ws_project = project_of({"workspacePaths": ["/tmp", project], "cwd": "/tmp"})
+    if multi_ws_project != project:
+        failures.append(f"project_of multi-workspace resolved {multi_ws_project!r}, expected {project!r}")
 
     def decide(role, name, args):
-        event = {"hookEventName": "PreToolUse", "conversationId": "selftest", "cwd": project,
-                 "workspacePaths": [project], "toolCall": {"name": name, "args": args, "id": "t"}}
-        return pre_tool(event, project, role)["decision"]
+        event = {"hookEventName": "PreToolUse", "conversationId": "selftest", "cwd": "/tmp",
+                 "workspacePaths": ["/tmp", project], "toolCall": {"name": name, "args": args, "id": "t"}}
+        return pre_tool(event, project_of(event), role)["decision"]
 
     home = os.path.expanduser(USER_CONFIG[0])
     pfx = "" if not ctx.modules or ctx.modules[0] == "." else ctx.modules[0] + "/"

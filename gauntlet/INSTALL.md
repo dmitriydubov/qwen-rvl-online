@@ -135,7 +135,13 @@ PIT оставляет тесту прежние вердикты. Гейт от
   `acceptanceTestRuntimeOnly 'tools.jackson.core:jackson-databind'` или Jackson 2 —
   `com.fasterxml.jackson.core:jackson-databind` вместе с `com.fasterxml.jackson.datatype:jackson-datatype-jdk8`.
 - Если контексту нужны PostgreSQL, RabbitMQ и т. п. — добавь в этот класс Testcontainers так же, как в
-  существующих интеграционных тестах (`@ServiceConnection` / `@DynamicPropertySource`).
+  существующих интеграционных тестах (`@ServiceConnection` / `@DynamicPropertySource`). На полном прогоне
+  `gherkinMutation` сценарии выполняются тысячами подряд в одном JVM, поэтому держи `@Before`/`@After` быстрыми:
+  очищай только непустые таблицы (проверкой `EXISTS` перед `TRUNCATE`), восстановление отказов стенда (пауза контейнера,
+  сброс блокировки лидера, повторная подписка слушателей брокера) запускай в `@After` только если в сценарии реально
+  вызывался шаг инжекции отказа (снимая флаг отказа лишь после полной переподписки слушателей), а тестовые очереди
+  RabbitMQ дренируй циклом `basicGet` вместо `channel.queuePurge` (тысячи `queue.purge` на классической очереди
+  RabbitMQ 4.1 копят `/` в пути сегмента индекса до `{error,enametoolong}`).
 - Пример фичи `templates/.../example_discount.feature` **не копируй**: это только образец формата.
   Каталог `src/acceptanceTest/resources/features/` создай пустым (файл `.gitkeep`).
 

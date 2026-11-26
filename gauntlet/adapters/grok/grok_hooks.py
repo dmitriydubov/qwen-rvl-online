@@ -38,13 +38,22 @@ import time
 
 sys.dont_write_bytecode = True          # importing guard.py must not leave __pycache__ inside gauntlet/
 
-ROOT = os.environ.get("CLAUDE_PROJECT_DIR") or os.environ.get("GROK_WORKSPACE_ROOT") or os.getcwd()
+HERE = os.path.dirname(os.path.realpath(__file__))
+REPO_ROOT = os.path.realpath(os.path.join(HERE, "..", "..", ".."))
+ROOT = os.environ.get("CLAUDE_PROJECT_DIR") or os.environ.get("GROK_WORKSPACE_ROOT") or (
+    REPO_ROOT if os.path.isfile(os.path.join(REPO_ROOT, "gauntlet", "config", "gauntlet.properties")) else os.getcwd()
+)
 HOOKS = os.path.join(ROOT, "gauntlet", "hooks")
 # Grok tool -> the Claude tool guard.py judges. The input fields guard.py reads (file_path, command) are the same.
 TOOLS = {"run_terminal_command": "Bash", "run_terminal_cmd": "Bash", "search_replace": "Edit",
          "hashline_edit": "Edit", "write": "Write"}
 PATCH_PATH = re.compile(r"^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+?)\s*$", re.M)
 ROLES = {"specifier", "hardener", "reviewer"}
+ROLE_HINT = re.compile(
+    r"(?:\[ROLE:\s*(specifier|hardener|reviewer|gauntlet-card-[a-z0-9-]+)\]"
+    r"|^\s*(specifier|hardener|reviewer|gauntlet-card-[a-z0-9-]+)\s*[:—-])",
+    re.I,
+)
 # Subagent types that may not change files or git state: guard.py gives them the reviewer's rights.
 READ_ONLY = re.compile(r"^(?:gauntlet-card-[a-z0-9-]+|explore|plan)$")
 # Paths a Grok agent must not change on top of guard.py's HUMAN_OWNED: its project instructions and configuration.
@@ -80,20 +89,46 @@ def main():
         return stop(event, sys.argv[2:])
     if mode == "report":
         return report(event)
+    if mode == "subagent-stop":
+        return subagent_stop(event)
     sys.stderr.write(f"grok_hooks.py: unknown mode {mode!r}\n")
     return 0
 
 
 # ----------------------------------------------------------------------------- shared
 
+def infer_kind(event):
+    kind = event.get("subagentType") or event.get("agent_type")
+    if kind and kind != "general-purpose":
+        return kind
+    for field in ("description", "subagentDescription", "prompt", "subagentPrompt"):
+        val = event.get(field)
+        if isinstance(val, str) and val:
+            m = ROLE_HINT.search(val)
+            if m:
+                return (m.group(1) or m.group(2)).lower()
+    return kind
+
+
 def role(event):
     """The agent_type guard.py and stop_gate.py read: the kit's role, reviewer rights for a read-only card, or None."""
-    kind = event.get("subagentType") or event.get("agent_type")
-    if not kind:
+    kind = infer_kind(event)
+    if not kind or kind == "general-purpose":
         return None
     if kind in ROLES:
         return kind
     return "reviewer" if READ_ONLY.match(kind) else kind
+
+
+def subagent_stop(event):
+    kind = infer_kind(event)
+    if kind == "hardener":
+        patched = dict(event, subagentType="hardener")
+        return stop(patched, ["--task", "mutationGate", "--max-attempts", "2", "--timeout", "3300"])
+    if kind == "reviewer" or (kind and READ_ONLY.match(kind) and kind.startswith("gauntlet-card-")):
+        patched = dict(event, subagentType=kind)
+        return report(patched)
+    return 0
 
 
 def claude_event(event, **changes):
@@ -136,9 +171,11 @@ def safe(text):
 # ----------------------------------------------------------------------------- SessionStart
 
 def session_start(event, raw):
+    env = dict(os.environ, CLAUDE_PROJECT_DIR=ROOT)
+    env.setdefault("ORG_GRADLE_PROJECT_publicRepositories", "true")
     try:
         proc = subprocess.run(["bash", os.path.join(HOOKS, "session_start.sh")], input=raw.encode(), cwd=ROOT,
-                              capture_output=True, timeout=170)
+                              env=env, capture_output=True, timeout=170)
         lines = proc.stdout.decode("utf-8", "replace").strip().splitlines()
         status = lines[-1] if lines else "[gauntlet] WARNING: session_start.sh printed nothing"
     except (OSError, subprocess.SubprocessError) as e:
@@ -244,13 +281,15 @@ def stop(event, args):
         if waiting:
             sys.stdout.write(json.dumps({"decision": "block", "reason": (
                 "[gauntlet] Не заканчивай ход: ещё работают " + "; ".join(waiting) + ". Дождись каждого "
-                "(wait_commands_or_subagents или get_command_or_subagent_output), прочитай отчёт сабагента целиком "
+                "(get_command_or_subagent_output с timeout_ms > 0), прочитай отчёт сабагента целиком "
                 "(если он обрезан - запроси полный вывод) и прими его по правилам приёмки; затем заканчивай.")},
                 ensure_ascii=False))
             return 0
     claude = claude_event(event)
-    proc = subprocess.run([sys.executable, "-B", os.path.join(HOOKS, "stop_gate.py")] + list(args),
-                          input=json.dumps(claude), capture_output=True, text=True, cwd=ROOT)
+    env = dict(os.environ, CLAUDE_PROJECT_DIR=ROOT)
+    env.setdefault("ORG_GRADLE_PROJECT_publicRepositories", "true")
+    proc = subprocess.run([sys.executable, "-I", "-B", os.path.join(HOOKS, "stop_gate.py")] + list(args),
+                          input=json.dumps(claude), capture_output=True, text=True, env=env, cwd=ROOT)
     sys.stdout.write(proc.stdout)
     sys.stderr.write(proc.stderr)
     return proc.returncode
