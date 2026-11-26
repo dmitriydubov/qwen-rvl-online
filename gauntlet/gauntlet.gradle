@@ -1338,6 +1338,155 @@ tasks.register('mutationGate') {
 def mutantsDir = buildDirFile('gherkin-mutation/mutants')
 def mutantResults = buildDirFile('gherkin-mutation/results')
 def mutantMessages = buildDirFile('gherkin-mutation/messages')
+def verifiedMutantsStamp = buildDirFile('gherkin-mutation/verified.sha256')
+
+def updateDigestWithTree = { java.security.MessageDigest md, File root ->
+    if (!root.exists()) {
+        md.update("MISSING\n".getBytes('UTF-8'))
+        return
+    }
+    if (root.isFile()) {
+        md.update("FILE:${root.name}:".getBytes('UTF-8'))
+        md.update(root.bytes)
+        md.update("\n".getBytes('UTF-8'))
+        return
+    }
+    def rootPath = root.toPath().toAbsolutePath().normalize()
+    def entries = []
+    Files.walk(rootPath).withCloseable { stream ->
+        stream.filter { Files.isRegularFile(it) }.forEach { entries << it }
+    }
+    entries.sort { a, b -> rootPath.relativize(a).toString() <=> rootPath.relativize(b).toString() }
+    entries.each { p ->
+        md.update("ENTRY:${rootPath.relativize(p).toString().replace('\\', '/')}:".getBytes('UTF-8'))
+        md.update(Files.readAllBytes(p))
+        md.update("\n".getBytes('UTF-8'))
+    }
+}
+
+def computeMutantRunStamp = { Test runTask ->
+    def md = java.security.MessageDigest.getInstance('SHA-256')
+    md.update("MUTANTS\n".getBytes('UTF-8'))
+    updateDigestWithTree(md, mutantsDir)
+    md.update("CLASSPATH\n".getBytes('UTF-8'))
+    sourceSets.acceptanceTest.runtimeClasspath.files.each { entry ->
+        if (entry.isDirectory()) {
+            md.update("DIR:${entry.canonicalPath}\n".getBytes('UTF-8'))
+            updateDigestWithTree(md, entry)
+        } else if (entry.isFile()) {
+            md.update("JAR:${entry.canonicalPath}:${entry.length()}:${entry.lastModified()}\n".getBytes('UTF-8'))
+        }
+    }
+    md.update("CONFIG\n".getBytes('UTF-8'))
+    updateDigestWithTree(md, gauntletFile('config'))
+    acceptanceInputs.each { path ->
+        md.update("ACC_INPUT:${path}\n".getBytes('UTF-8'))
+        updateDigestWithTree(md, file(path))
+    }
+    ['build.gradle', 'build.gradle.kts', 'settings.gradle', 'settings.gradle.kts', 'gradle.properties'].each { name ->
+        def f = new File(projectDir, name)
+        if (f.isFile()) {
+            updateDigestWithTree(md, f)
+        }
+    }
+    md.update("JVM:${gateJavaBin()}|heap:${setting('gherkin.maxHeapSize', '')}\n".getBytes('UTF-8'))
+    gradle.startParameter.projectProperties.sort { it.key }.each { k, v ->
+        md.update("P:${k}=${v}\n".getBytes('UTF-8'))
+    }
+    ['_JAVA_OPTIONS', 'JAVA_TOOL_OPTIONS', 'JDK_JAVA_OPTIONS'].each { envKey ->
+        md.update("ENV:${envKey}=${runTask.environment[envKey] ?: ''}\n".getBytes('UTF-8'))
+    }
+    return md.digest().encodeHex().toString()
+}
+
+def verifiedMutantRunMatches = { Test runTask ->
+    if (gradle.startParameter.rerunTasks || !verifiedMutantsStamp.isFile()) {
+        return false
+    }
+    def hasXml = mutantResults.isDirectory() && (mutantResults.listFiles()?.any {
+        it.isFile() && it.name.startsWith('TEST-') && it.name.endsWith('.xml')
+    } ?: false)
+    def hasNdjson = mutantMessages.isDirectory() && (mutantMessages.listFiles()?.any {
+        it.isFile() && it.name.endsWith('.ndjson')
+    } ?: false)
+    if (!hasXml || !hasNdjson) {
+        return false
+    }
+    return verifiedMutantsStamp.getText('UTF-8').trim() == computeMutantRunStamp(runTask)
+}
+
+def compileBaseAcceptanceGlue = { File baseSrcDir, File baseClassesDir ->
+    baseSrcDir.deleteDir()
+    baseClassesDir.deleteDir()
+    baseClassesDir.mkdirs()
+    def existingBaseRoots = sourceSets.acceptanceTest.java.srcDirs
+            .collect { relativeTo(projectDir, it).replace(File.separator, '/') }
+            .findAll { !it.startsWith('..') && git(['ls-tree', '-d', mergeBase(), '--', it]) }
+    if (!existingBaseRoots) {
+        return true
+    }
+    def archiveZip = buildDirFile('gherkin-mutation/base-glue.zip')
+    archiveZip.delete()
+    archiveZip.parentFile.mkdirs()
+    def archived = providers.exec {
+        commandLine(['git', 'archive', '--format=zip', '-o', archiveZip.absolutePath, mergeBase(), '--'] + existingBaseRoots)
+        workingDir = projectDir
+        ignoreExitValue = true
+    }
+    archived.standardOutput.asText.get()
+    if (archived.result.get().exitValue != 0 || !archiveZip.isFile()) {
+        return false
+    }
+    def javaFiles = []
+    new java.util.zip.ZipFile(archiveZip).withCloseable { zf ->
+        zf.entries().each { entry ->
+            if (!entry.isDirectory() && entry.name.endsWith('.java')) {
+                def dest = new File(baseSrcDir, entry.name)
+                dest.parentFile.mkdirs()
+                zf.getInputStream(entry).withCloseable { ins -> dest.bytes = ins.bytes }
+                javaFiles << dest
+            }
+        }
+    }
+    archiveZip.delete()
+    if (!javaFiles) {
+        return true
+    }
+    def compileTask = tasks.findByName('compileAcceptanceTestJava')
+    if (!(compileTask instanceof JavaCompile)) {
+        return false
+    }
+    def javacFile = compileTask.javaCompiler.orNull?.executablePath?.asFile
+            ?: new File(System.getProperty('java.home'), 'bin/javac')
+    if (!javacFile.isFile()) {
+        return false
+    }
+    def javacArgs = ['-d', baseClassesDir.absolutePath,
+                     '-encoding', compileEncoding('compileAcceptanceTestJava') ?: sourceEncoding(),
+                     '-classpath', compileTask.classpath.asPath, '-nowarn']
+    def procPath = compileTask.options.annotationProcessorPath
+    if (procPath != null && !procPath.empty) {
+        javacArgs.addAll(['-processorpath', procPath.asPath])
+    } else {
+        javacArgs << '-proc:none'
+    }
+    if (compileTask.options.release.present) {
+        javacArgs.addAll(['--release', compileTask.options.release.get().toString()])
+    } else if (java.sourceCompatibility && java.targetCompatibility) {
+        javacArgs.addAll(['-source', java.sourceCompatibility.toString(), '-target', java.targetCompatibility.toString()])
+    }
+    javaFiles.sort { it.absolutePath }.each { javacArgs << it.absolutePath }
+    def argFile = buildDirFile('gherkin-mutation/base-glue-javac.args')
+    argFile.setText(javacArgs.collect { '"' + it.replace('\\', '\\\\').replace('"', '\\"') + '"' }.join('\n') + '\n', 'UTF-8')
+    def compiled = providers.exec {
+        commandLine([javacFile.absolutePath, '@' + argFile.absolutePath])
+        workingDir = projectDir
+        ignoreExitValue = true
+    }
+    compiled.standardOutput.asText.get()
+    compiled.standardError.asText.get()
+    return compiled.result.get().exitValue == 0
+}
 
 tasks.register('gherkinMutants', Exec) {
     group = 'gauntlet'
@@ -1352,16 +1501,33 @@ tasks.register('gherkinMutants', Exec) {
         def changed = changedFiles()
         if (changed != null) {
             // The step definitions are what this gate checks: a changed glue file or acceptance resource can hollow
-            // a step of a feature that did not change, so then every feature is mutated. Deleting a glue file (a
-            // hook, a step class) or moving it away changes the glue as well: both ends of a rename count.
+            // a step of a feature that did not change. Deleted glue files, non-Java glue or acceptance resources fall
+            // back to mutating every feature; modified/added Java glue is narrowed to impacted features via compiled
+            // base-vs-head method bytecode and acceptanceTest's Cucumber message stream.
             def touched = (gitPaths(['diff', '-z', '--relative', '--name-only', '--no-renames', mergeBase()]) ?: []) + changed
             def roots = sourceSets.acceptanceTest.allSource.srcDirs.collect { it.toPath().toAbsolutePath().normalize() }
+            def javaRoots = sourceSets.acceptanceTest.java.srcDirs.collect { it.toPath().toAbsolutePath().normalize() }
             def changedGlue = touched.unique().findAll { path ->
                 !path.endsWith('.feature') && roots.any { file(path).toPath().toAbsolutePath().normalize().startsWith(it) }
             }
             if (changedGlue) {
-                logger.lifecycle("gauntlet: ${changedGlue.size()} acceptance glue file(s) changed (" +
-                        "${changedGlue.take(3).join(', ')}${changedGlue.size() > 3 ? ', ...' : ''}) - every feature is mutated")
+                def baseSrcDir = buildDirFile('gherkin-mutation/base-glue-src')
+                def baseClassesDir = buildDirFile('gherkin-mutation/base-glue-classes')
+                def javaOnly = hasFeatures(featuresDir) && acceptanceMessages.isDirectory() && changedGlue.every { path ->
+                    path.endsWith('.java') && file(path).isFile() &&
+                            javaRoots.any { file(path).toPath().toAbsolutePath().normalize().startsWith(it) }
+                }
+                if (javaOnly && compileBaseAcceptanceGlue(baseSrcDir, baseClassesDir)) {
+                    def headDirs = sourceSets.acceptanceTest.output.classesDirs.files*.absolutePath
+                    def impactSpec = [acceptanceMessages.absolutePath, '--base', baseClassesDir.absolutePath, '--head'] + headDirs
+                    logger.lifecycle("gauntlet: ${changedGlue.size()} acceptance glue Java file(s) changed (" +
+                            "${changedGlue.take(3).join(', ')}${changedGlue.size() > 3 ? ', ...' : ''}) - narrowing scope via bytecode + message stream")
+                    args '--only-file', pathList('changed-features', changedFeatures()),
+                            '--glue-impact', pathList('glue-impact', impactSpec)
+                } else {
+                    logger.lifecycle("gauntlet: ${changedGlue.size()} acceptance glue file(s) changed (" +
+                            "${changedGlue.take(3).join(', ')}${changedGlue.size() > 3 ? ', ...' : ''}) - every feature is mutated")
+                }
             } else {
                 args '--only-file', pathList('changed-features', changedFeatures())
             }
@@ -1380,9 +1546,13 @@ tasks.register('gherkinMutantsRun', Test) {
     reports.html.required = false
     outputs.upToDateWhen { false }
     jacoco { enabled = false }
-    onlyIf { task -> hasFeatures(mutantsDir) || skippedByTheKit(task, 'no Examples value in scope') }
+    onlyIf { task ->
+        (hasFeatures(mutantsDir) || skippedByTheKit(task, 'no Examples value in scope')) &&
+                (!verifiedMutantRunMatches(task as Test) || skippedByTheKit(task, 'inputs unchanged since green gherkinMutation'))
+    }
     def stream = cucumberMessages(it, mutantMessages)
     doFirst { Test task ->
+        verifiedMutantsStamp.delete()
         // failing scenarios are what this run is for: a project-wide failFast would stop it after the first kill
         failFast = false
         // The controls of a row run before its mutants and after them (GherkinMutator generate): one JVM, one scenario
@@ -1451,7 +1621,18 @@ tasks.register('gherkinMutation', Exec) {
     // so does the verdict: the language of the glue and the encoding of its sources do not matter. The entries go as
     // a list file (see pathList): a classpath can be long, and a path can hold any separator.
     def glueClasspath = sourceSets.acceptanceTest.runtimeClasspath
-    doFirst { args '--glue-file', pathList('glue-classpath', glueClasspath.files*.absolutePath) }
+    doFirst {
+        verifiedMutantsStamp.delete()
+        args '--glue-file', pathList('glue-classpath', glueClasspath.files*.absolutePath)
+    }
+    doLast { task ->
+        if (task.executionResult.getOrNull()?.exitValue == 0 && hasFeatures(mutantsDir)) {
+            verifiedMutantsStamp.parentFile.mkdirs()
+            verifiedMutantsStamp.setText(computeMutantRunStamp(tasks.getByName('gherkinMutantsRun') as Test) + '\n', 'UTF-8')
+        } else {
+            verifiedMutantsStamp.delete()
+        }
+    }
 }
 
 // ------------------------------------------------------------------------------ aggregates
@@ -1557,14 +1738,28 @@ abstract class GauntletBuildLock implements BuildService<GauntletBuildLock.Param
     }
 }
 
+class HoldGauntletBuildLock implements Action<Task> {
+    private final Provider<GauntletBuildLock> lock
+    private final String path
+
+    HoldGauntletBuildLock(Provider<GauntletBuildLock> lock, String path) {
+        this.lock = lock
+        this.path = path
+    }
+
+    @Override
+    void execute(Task task) {
+        lock.get().hold(path)
+    }
+}
+
 def buildLock = gradle.sharedServices.registerIfAbsent('gauntletBuildLock-' + projectDir.absolutePath.md5(), GauntletBuildLock) {
     parameters.lockPath = new File(projectDir, '.gradle/gauntlet-build.lock').absolutePath
     parameters.waitSeconds = (findProperty('gauntlet.lockWaitSeconds') ?: '1500').toString().toInteger()
 }
 tasks.configureEach { Task task ->
     task.usesService(buildLock)
-    def path = task.path
-    task.doFirst { buildLock.get().hold(path) }
+    task.doFirst(new HoldGauntletBuildLock(buildLock, task.path))
 }
 
 // ------------------------------------------------------------------------------ gate JVM

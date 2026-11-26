@@ -89,11 +89,13 @@ fi
 if [ "$docker_status" = up ] && [ "${GAUNTLET_DOCKER:-on}" != "off" ] \
     && [ "$(timeout 5 docker info --format '{{.CgroupDriver}}' 2>/dev/null)" = "none" ]; then
   shim_sock="${GAUNTLET_DOCKER_SHIM_SOCK:-/tmp/docker-pause-shim.sock}"
-  if [ ! -S "$shim_sock" ] && command -v setsid >/dev/null 2>&1; then
+  shim_alive() { [ -S "$shim_sock" ] && timeout 3 docker --host "unix://$shim_sock" info >/dev/null 2>&1; }
+  if ! shim_alive && command -v setsid >/dev/null 2>&1; then
+    rm -f "$shim_sock" 2>/dev/null || true
     setsid nohup python3 -I -B gauntlet/hooks/docker_pause_shim.py "$shim_sock" </dev/null >>/tmp/docker-pause-shim.log 2>&1 &
-    for _ in 1 2 3 4 5 6; do [ -S "$shim_sock" ] && break; sleep 0.5; done
+    for _ in 1 2 3 4 5 6; do shim_alive && break; sleep 0.5; done
   fi
-  [ -S "$shim_sock" ] && docker_status="up (pause-shim: $shim_sock)"
+  shim_alive && docker_status="up (pause-shim: $shim_sock)"
 fi
 
 if reachable; then

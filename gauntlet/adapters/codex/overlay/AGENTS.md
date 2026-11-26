@@ -13,7 +13,8 @@
    проект не доверен или это Codex Cloud). Тогда первой строкой ответа сообщи владельцу «хуки gauntlet не работают», выполни
    `printenv GAUNTLET_GUARD`, прочитай `gauntlet/CLAUDE.md` сам целиком (`sed -n '1,200p'`, затем дальше
    по 200 строк — до конца файла) и **без остановки на вопрос** веди задачу по разделу 3 «Без хуков». Пустой вывод или любое значение,
-   кроме `off`, — guard включён; `off` — сообщи и не трогай файлы набора, пока владелец не разрешит.
+   кроме `off`, означает лишь, что защита не выключена переменной окружения, но без `SessionStart` срабатывание хуков не
+   подтверждено (охрану путей и прогон гейтов держишь ты по разделу 3); `off` — сообщи и не трогай файлы набора, пока владелец не разрешит.
 3. Проверь и при необходимости сам настрой окружение без остановки на вопрос человеку: `docker info` (если Docker не установлен или демон не запущен — установи `docker.io` через `apt-get` / `sudo -n apt-get` при наличии прав, подними `dockerd --host=unix:///var/run/docker.sock` в фоне и дождись `docker info`; если `docker info --format '{{.CgroupDriver}}'` печатает `none` или `docker pause` падает с `freezer not supported`, подними штатный прокси `nohup python3 -I -B gauntlet/hooks/docker_pause_shim.py /tmp/docker-pause-shim.sock >/tmp/docker-pause-shim.log 2>&1 &`, перезапусти `./gradlew --stop` и передавай `DOCKER_HOST=unix:///tmp/docker-pause-shim.sock` без правки репозитория; при падении `rabbitmq:*-alpine` на 2-vCPU VM с `OS monotonic time stepped backwards!` собери локальный образ с `ENV ERL_AFLAGS="+c false"` под тем же тегом без правки репозитория), JDK нужной версии из `gauntlet/config/gauntlet.properties` (`project.java.version`, `gate.java.version` — найди в `/usr/lib/jvm`, `~/.jdks`, `~/.sdkman`, `/workspace` или кэше Gradle либо установи `openjdk-<версия>-jdk` и экспортируй `JAVA_HOME`, `GAUNTLET_GATE_JAVA_HOME`) и `ORG_GRADLE_PROJECT_publicRepositories=true`.
 4. Где `gauntlet/CLAUDE.md` говорит о Claude Code, действуют замены раздела 2. Где этот файл молчит,
    действует `gauntlet/CLAUDE.md`. Если ты координатор серии, процесс серии задаёт твой промпт.
@@ -93,7 +94,8 @@
    `> Task …` у каждой задачи гейта (`gauntletScope`, `integrityCheck`, `checkstyleGate`, `pmdGate`, `test`,
    `archTest`, `testCensus`, `acceptanceTest`, `acceptanceCheck`, `jacocoTestReport`, `crapGate`,
    `cpdReport`, `dryGate`) и итог; рядом — `git rev-parse --short HEAD` и `git status --short | wc -l`.
-   Для `hardener` то же с `mutationGate`, в финале — с `gauntlet`.
+   Для `hardener` то же с `mutationGate`, в финале — с `gauntlet` (поток сообщений Cucumber по завершении каждого
+   тестового JVM переименовывается из `current.ndjson` в `jvm-1.ndjson`).
 2. Нет строки задачи, `FAILED` или прогон старше последней правки — гейт не пройден.
 3. Окончательно решает CI (`gauntlet` и `gauntlet kit unchanged` на PR).
 4. Если `spawn_agent` в этой среде не принимает `agent_type` из `.codex/agents/*.toml`, вызывай `spawn_agent`
@@ -101,6 +103,9 @@
    `.claude/agents/<роль>.md` и ограничения из `.codex/agents/<роль>.toml`, а после завершения роли сам проверь её
    область записи (`git status --short`, для `reviewer` — чистый снимок дерева, для `hardener` — пустой
    `git diff --stat -- '*/src/main/*'` и вывод `mutationGate`).
+5. Если в Codex Cloud `gh pr create` отвечает `GraphQL: Resource not accessible by integration` / `Forbidden` на
+   прокси-токене сессии, открой PR через подключённый GitHub-коннектор (инструмент создания PR) с тем же заголовком и
+   отчётом; если коннектора нет — оставь ветку запушенной и передай заголовок и описание PR владельцу в чат.
 
 ## 4. Правило тщательности (для тебя и для каждого субагента)
 
