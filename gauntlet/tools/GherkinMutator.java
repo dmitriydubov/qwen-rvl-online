@@ -2642,7 +2642,7 @@ public class GherkinMutator {
                 if (feature == null || impactedRealPaths.contains(feature)) {
                     continue;
                 }
-                if (testCaseImpacted(tc, changedStepIds, changedHookIds, changedParamNames)) {
+                if (testCaseImpacted(tc, hooks.keySet(), changedStepIds, changedHookIds, changedParamNames)) {
                     impactedRealPaths.add(feature);
                 }
             }
@@ -2784,23 +2784,24 @@ public class GherkinMutator {
             return bSig == null || hSig == null || !bSig.equals(hSig);
         }
 
-        static boolean testCaseImpacted(Map<String, Object> tc, Set<String> changedStepIds, Set<String> changedHookIds,
-                                        Set<String> changedParamNames) {
+        static boolean testCaseImpacted(Map<String, Object> tc, Set<String> knownHookIds, Set<String> changedStepIds,
+                                        Set<String> changedHookIds, Set<String> changedParamNames) {
             if (!(tc.get("testSteps") instanceof List<?> steps)) {
                 return false;
             }
             for (Object stepObj : steps) {
                 Map<String, Object> ts = Json.object(stepObj, "testCase.testSteps");
-                if (ts.get("hookId") instanceof String hookId && changedHookIds.contains(hookId)) {
+                if (ts.get("hookId") instanceof String hookId && !hookId.isEmpty()) {
+                    if (!knownHookIds.contains(hookId) || changedHookIds.contains(hookId)) {
+                        return true;
+                    }
+                    continue;
+                }
+                if (!(ts.get("stepDefinitionIds") instanceof List<?> sdIds) || sdIds.size() != 1) {
                     return true;
                 }
-                if (ts.get("stepDefinitionIds") instanceof List<?> sdIds) {
-                    if (sdIds.size() != 1) {
-                        return true;
-                    }
-                    if (sdIds.get(0) instanceof String sdId && changedStepIds.contains(sdId)) {
-                        return true;
-                    }
+                if (!(sdIds.get(0) instanceof String sdId) || changedStepIds.contains(sdId)) {
+                    return true;
                 }
                 if (ts.get("stepMatchArgumentsLists") instanceof List<?> argLists) {
                     for (Object listObj : argLists) {
