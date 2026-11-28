@@ -8,6 +8,7 @@ import org.springframework.web.HttpMediaTypeNotSupportedException;
 import org.springframework.web.bind.MissingServletRequestParameterException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.method.annotation.MethodArgumentConversionNotSupportedException;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 import org.springframework.web.multipart.MaxUploadSizeExceededException;
 import org.springframework.web.multipart.MultipartException;
@@ -36,6 +37,11 @@ public class RequestFormatAdvice {
     }
 
     @ExceptionHandler
+    public ResponseEntity<ErrorResponse> unsupportedValue(MethodArgumentConversionNotSupportedException invalid) {
+        return ApiErrors.invalidField(invalid.getName(), INVALID_FORMAT);
+    }
+
+    @ExceptionHandler
     public ResponseEntity<ErrorResponse> missingParameter(MissingServletRequestParameterException missing) {
         return ApiErrors.invalidField(missing.getParameterName(), MISSING);
     }
@@ -43,6 +49,11 @@ public class RequestFormatAdvice {
     @ExceptionHandler
     public ResponseEntity<ErrorResponse> missingPart(MissingServletRequestPartException missing) {
         return ApiErrors.invalidField(missing.getRequestPartName(), MISSING);
+    }
+
+    @ExceptionHandler
+    public ResponseEntity<ErrorResponse> missingFileName(MissingFileNameException missing) {
+        return ApiErrors.invalidField(ApiErrors.FILE_FIELD, INVALID_FORMAT);
     }
 
     @ExceptionHandler

@@ -8,7 +8,7 @@ Java 21, Spring Boot 4.0.7, Liquibase 5.0, PostgreSQL 16, RabbitMQ 4.1, S3 (MinI
 ## О сервисе
 
 По задаче Заявок выпускает через 1С:УСК договор КМ на доплату или полис ЛМ родственнику без доплаты,
-принимает справки 070/у, акцепт оферты и оплату через Ordering, отвечает Заявкам. Фоновую работу ведёт ведущий
+принимает справки 070/у и согласия, акцепт оферты и оплату через Ordering, отвечает Заявкам. Фоновую работу ведёт ведущий
 (`leader_lock`).
 
 ## Таймауты
@@ -30,20 +30,20 @@ Java 21, Spring Boot 4.0.7, Liquibase 5.0, PostgreSQL 16, RabbitMQ 4.1, S3 (MinI
 - Брокер: DOWN у `internalBroker`/`onecBroker`/`marketingBroker` — ждут только его сообщения; нет очереди 1С:УСК —
   ERROR `…_UNDELIVERED`.
 - Ordering, сервер токенов: заказ и счёт ждут, растёт `contracts_ordering_failures_total`.
-- S3: справка — 503 `STORAGE_UNAVAILABLE`, передача КМ ждёт.
+- S3: вложения — 503 `STORAGE_UNAVAILABLE`, передача КМ ждёт.
 - 1С:УСК молчит: запись в SUBMITTED; дольше `…_AWAITING_THRESHOLD` — `contracts_*_awaiting_overdue`.
-- Без соседей: `RABBITMQ_*_LISTENER_AUTO_STARTUP` и обязательная `PAYMENT_ENABLED` = `false`; договор, акцептованный
-  при `false`, заказа не получит и после включения. С заказами в работе оплату не выключают.
+- Без соседей: `RABBITMQ_*_LISTENER_AUTO_STARTUP` и `PAYMENT_ENABLED` = `false` (обязательна); акцепт при `false`
+  заказа не получит и после включения. С заказами в работе оплату не выключают.
 
 ## Сообщения
 
 Очереди: `rvl_requests_to_rvl_contracts_task-changes`, `rvl_contracts_to_rvl_requests_status-changes`,
 `rvl_contracts_to_1c-usk_*`, `1c-usk_to_rvl_contracts_*` (`*` — `lm-policy-changes`, `km-contract-changes`). Брокер
-маркетинга: подтверждение документа — `MARKETING_DOCUMENT_FIXES_EXCHANGE`, события заказов —
-`MARKETING_ORDER_EVENTS_QUEUE`.
+маркетинга: `fixed` — `MARKETING_DOCUMENT_FIXES_EXCHANGE`, события — `MARKETING_ORDER_EVENTS_QUEUE`.
 
-REST от Заявок: справка — `POST /requests/{заявка}/participants/{участник}/attachments`, пакет —
-`GET /requests/{заявка}/package`, акцепт — `POST /contracts/{договор}/acceptance`.
+REST от Заявок: справка — `POST /requests/{заявка}/participants/{участник}/attachments`, согласие —
+`POST /policies/{полис}/family-members/{родственник}/consents`, пакет — `GET /requests/{заявка}/package`, акцепт —
+`POST /contracts/{договор}/acceptance`.
 
 ## Диагностика по базе
 

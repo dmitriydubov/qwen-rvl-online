@@ -1,0 +1,100 @@
+databaseChangeLog:
+
+  - changeSet:
+      id: 015-attachments-type
+      author: contract-service
+      comment: >
+        Вид документа «согласие на обработку ПДн» для согласий родственников, загружаемых по полису
+        и члену семьи. Значение добавляется отдельным набором изменений: новое значение перечисления
+        PostgreSQL нельзя использовать в той же транзакции, где его добавили.
+      changes:
+        - sql:
+            sql: ALTER TYPE printed_form_type ADD VALUE IF NOT EXISTS 'PD_CONSENT';
+      rollback: []
+
+  - changeSet:
+      id: 015-attachments
+      author: contract-service
+      comment: >
+        Ранний приём медицинских справок до задачи на выпуск, хранение согласий на обработку ПДн по
+        полису и члену семьи и реквизиты мягкого удаления вложений в contract_documents. Внешний ключ
+        на issuance_requests снят, ограничения владельца и вида документа пересобраны одним оператором
+        ALTER TABLE, добавлены индекс по полису и члену семьи и ограничение согласованности мягкого
+        удаления.
+      changes:
+        - addColumn:
+            tableName: contract_documents
+            columns:
+              - column: { name: policy_id, type: uuid }
+              - column: { name: family_member_id, type: uuid }
+              - column: { name: deleted_at, type: timestamptz }
+              - column: { name: deleted_request_id, type: varchar(64) }
+        - sql:
+            sql: >
+              ALTER TABLE contract_documents
+                DROP CONSTRAINT fk_contract_documents_request,
+                DROP CONSTRAINT ck_contract_documents_single_owner,
+                DROP CONSTRAINT ck_contract_documents_participant_attachment,
+                DROP CONSTRAINT ck_contract_documents_certificate_type,
+                ADD CONSTRAINT ck_contract_documents_single_owner
+                  CHECK (num_nonnulls(contract_id, lm_policy_id, individual_request_id, policy_id) = 1),
+                ADD CONSTRAINT ck_contract_documents_attachment_owner
+                  CHECK (
+                    (doc_type IN ('CONTRACT', 'POLICY', 'APPENDIX')
+                      AND attachment_id IS NULL
+                      AND individual_request_id IS NULL
+                      AND participant_id IS NULL
+                      AND policy_id IS NULL
+                      AND family_member_id IS NULL
+                      AND deleted_at IS NULL)
+                    OR (doc_type = 'MEDICAL_CERTIFICATE'
+                      AND individual_request_id IS NOT NULL
+                      AND participant_id IS NOT NULL
+                      AND attachment_id IS NOT NULL
+                      AND policy_id IS NULL
+                      AND family_member_id IS NULL)
+                    OR (doc_type = 'PD_CONSENT'
+                      AND policy_id IS NOT NULL
+                      AND family_member_id IS NOT NULL
+                      AND attachment_id IS NOT NULL
+                      AND individual_request_id IS NULL
+                      AND participant_id IS NULL)
+                  ),
+                ADD CONSTRAINT ck_contract_documents_deletion
+                  CHECK ((deleted_at IS NULL) = (deleted_request_id IS NULL)
+                    AND (deleted_request_id IS NULL OR btrim(deleted_request_id) <> ''));
+        - createIndex:
+            tableName: contract_documents
+            indexName: ix_contract_documents_consent
+            columns:
+              - column: { name: policy_id }
+              - column: { name: family_member_id }
+      rollback:
+        - sql:
+            sql: >
+              DELETE FROM contract_documents
+              WHERE policy_id IS NOT NULL
+                 OR deleted_at IS NOT NULL
+                 OR (individual_request_id IS NOT NULL
+                     AND NOT EXISTS (
+                         SELECT 1 FROM issuance_requests r
+                         WHERE r.individual_request_id = contract_documents.individual_request_id
+                     ));
+              ALTER TABLE contract_documents
+                DROP CONSTRAINT ck_contract_documents_deletion,
+                DROP CONSTRAINT ck_contract_documents_attachment_owner,
+                DROP CONSTRAINT ck_contract_documents_single_owner,
+                ADD CONSTRAINT ck_contract_documents_single_owner
+                  CHECK (num_nonnulls(contract_id, lm_policy_id, individual_request_id) = 1),
+                ADD CONSTRAINT ck_contract_documents_participant_attachment
+                  CHECK ((individual_request_id IS NULL) = (participant_id IS NULL)
+                     AND (individual_request_id IS NULL) = (attachment_id IS NULL)),
+                ADD CONSTRAINT ck_contract_documents_certificate_type
+                  CHECK ((doc_type = 'MEDICAL_CERTIFICATE') = (attachment_id IS NOT NULL)),
+                ADD CONSTRAINT fk_contract_documents_request
+                  FOREIGN KEY (individual_request_id) REFERENCES issuance_requests(individual_request_id);
+        - dropIndex: { tableName: contract_documents, indexName: ix_contract_documents_consent }
+        - dropColumn: { tableName: contract_documents, columnName: deleted_request_id }
+        - dropColumn: { tableName: contract_documents, columnName: deleted_at }
+        - dropColumn: { tableName: contract_documents, columnName: family_member_id }
+        - dropColumn: { tableName: contract_documents, columnName: policy_id }

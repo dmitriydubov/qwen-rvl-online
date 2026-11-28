@@ -74,7 +74,7 @@ public class PrintedForm {
 
     @Nullable
     @Embedded
-    private ParticipantAttachment attachment;
+    private DocumentAttachment attachment;
 
     protected PrintedForm() {
     }
@@ -90,10 +90,10 @@ public class PrintedForm {
         this.createdAt = now;
     }
 
-    private PrintedForm(ParticipantAttachment attachment, StoredFile file, Instant now) {
+    private PrintedForm(PrintedFormType docType, DocumentAttachment attachment, StoredFile file, Instant now) {
         this.attachment = attachment;
         this.kind = PrintedFormKind.FINAL;
-        this.docType = PrintedFormType.MEDICAL_CERTIFICATE;
+        this.docType = docType;
         this.version = FIRST_VERSION;
         this.fileKey = file.key();
         this.fileHash = file.hash();
@@ -106,8 +106,9 @@ public class PrintedForm {
         return new PrintedForm(owner, document, now);
     }
 
-    public static PrintedForm receivedCertificate(ParticipantAttachment attachment, StoredFile file, Instant now) {
-        return new PrintedForm(attachment, file, now);
+    public static PrintedForm receivedAttachment(PrintedFormType docType, DocumentAttachment attachment,
+            StoredFile file, Instant now) {
+        return new PrintedForm(docType, attachment, file, now);
     }
 
     public UUID id() {
@@ -134,7 +135,7 @@ public class PrintedForm {
         return Optional.ofNullable(uskFileUrl);
     }
 
-    public Optional<ParticipantAttachment> attachment() {
+    public Optional<DocumentAttachment> attachment() {
         return Optional.ofNullable(attachment);
     }
 

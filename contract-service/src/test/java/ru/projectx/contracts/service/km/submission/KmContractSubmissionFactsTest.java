@@ -18,13 +18,12 @@ import ru.projectx.contracts.entity.contract.Contract;
 import ru.projectx.contracts.entity.contract.ContractAcceptance;
 import ru.projectx.contracts.entity.party.ContractPerson;
 import ru.projectx.contracts.entity.contract.OfferAcceptance;
-import ru.projectx.contracts.entity.document.ParticipantAttachment;
+import ru.projectx.contracts.entity.document.DocumentAttachments;
 import ru.projectx.contracts.entity.party.PersonOwner;
 import ru.projectx.contracts.entity.party.PersonRole;
 import ru.projectx.contracts.entity.document.PrintedForm;
 import ru.projectx.contracts.entity.document.PrintedFormType;
 import ru.projectx.contracts.entity.document.StoredFile;
-import ru.projectx.contracts.entity.document.UskDocument;
 import ru.projectx.contracts.repository.issuance.ContractAcceptanceRepository;
 import ru.projectx.contracts.repository.issuance.ContractPersonRepository;
 import ru.projectx.contracts.repository.issuance.PrintedFormRepository;
@@ -62,8 +61,9 @@ class KmContractSubmissionFactsTest {
         given(acceptances.findByContractId(CONTRACT_ID)).willReturn(Optional.of(ContractAcceptance.record(CONTRACT_ID,
                 new OfferAcceptance(1, UUID.fromString("b0a1c7e4-52d9-4f31-8c06-7e3a9b1d2f45"), ACCEPTED_AT,
                         AcceptanceChannel.WEB, InetAddress.getLoopbackAddress(), null), NOW)));
-        given(forms.findByAttachmentIndividualRequestIdAndAttachmentParticipantIdOrderByCreatedAtAscIdAsc(Tasks.REQUEST,
-                Tasks.SPOUSE)).willReturn(List.of(certificate(FIRST_DOCUMENT, JPEG), certificate(SECOND_DOCUMENT, PDF)));
+        given(forms.findByAttachmentIndividualRequestIdAndAttachmentParticipantIdAndDocTypeAndAttachmentDeletedAtIsNullOrderByCreatedAtAscIdAsc(
+                Tasks.REQUEST, Tasks.SPOUSE, PrintedFormType.MEDICAL_CERTIFICATE))
+                .willReturn(List.of(certificate(FIRST_DOCUMENT, JPEG), certificate(SECOND_DOCUMENT, PDF)));
     }
 
     @Test
@@ -92,8 +92,8 @@ class KmContractSubmissionFactsTest {
 
     @Test
     void contractWithoutCertificates_hasAnEmptyListOfThem() {
-        given(forms.findByAttachmentIndividualRequestIdAndAttachmentParticipantIdOrderByCreatedAtAscIdAsc(Tasks.REQUEST,
-                Tasks.SPOUSE)).willReturn(List.of());
+        given(forms.findByAttachmentIndividualRequestIdAndAttachmentParticipantIdAndDocTypeAndAttachmentDeletedAtIsNullOrderByCreatedAtAscIdAsc(
+                Tasks.REQUEST, Tasks.SPOUSE, PrintedFormType.MEDICAL_CERTIFICATE)).willReturn(List.of());
 
         assertThat(facts.gather(contract, IDENTIFIERS).certificates()).isEmpty();
     }
@@ -118,11 +118,14 @@ class KmContractSubmissionFactsTest {
 
     @Test
     void certificateRecordWithoutAnObject_isIllegalState() {
-        PrintedForm form = PrintedForm.issuedFor(PersonOwner.contract(CONTRACT_ID),
-                new UskDocument(PrintedFormType.POLICY, "https://1c-usk.example/p.pdf", null), NOW);
-        ReflectionTestUtils.setField(form, "id", FIRST_DOCUMENT);
-        given(forms.findByAttachmentIndividualRequestIdAndAttachmentParticipantIdOrderByCreatedAtAscIdAsc(Tasks.REQUEST,
-                Tasks.SPOUSE)).willReturn(List.of(form));
+        PrintedForm form = mock();
+        given(form.id()).willReturn(FIRST_DOCUMENT);
+        given(form.docType()).willReturn(PrintedFormType.MEDICAL_CERTIFICATE);
+        given(form.attachment()).willReturn(Optional.of(
+                DocumentAttachments.certificate(Tasks.REQUEST, Tasks.SPOUSE, UUID.randomUUID())));
+        given(form.storedFile()).willReturn(Optional.empty());
+        given(forms.findByAttachmentIndividualRequestIdAndAttachmentParticipantIdAndDocTypeAndAttachmentDeletedAtIsNullOrderByCreatedAtAscIdAsc(
+                Tasks.REQUEST, Tasks.SPOUSE, PrintedFormType.MEDICAL_CERTIFICATE)).willReturn(List.of(form));
 
         assertThatThrownBy(() -> facts.gather(contract, IDENTIFIERS)).isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining(FIRST_DOCUMENT.toString());
@@ -133,8 +136,8 @@ class KmContractSubmissionFactsTest {
     }
 
     private static PrintedForm certificate(UUID documentId, StoredFile file) {
-        PrintedForm form = PrintedForm.receivedCertificate(new ParticipantAttachment(Tasks.REQUEST, Tasks.SPOUSE,
-                UUID.randomUUID()), file, NOW);
+        PrintedForm form = PrintedForm.receivedAttachment(PrintedFormType.MEDICAL_CERTIFICATE,
+                DocumentAttachments.certificate(Tasks.REQUEST, Tasks.SPOUSE, UUID.randomUUID()), file, NOW);
         ReflectionTestUtils.setField(form, "id", documentId);
         return form;
     }

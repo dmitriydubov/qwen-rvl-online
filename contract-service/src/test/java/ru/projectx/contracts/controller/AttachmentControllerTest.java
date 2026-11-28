@@ -1,6 +1,7 @@
 package ru.projectx.contracts.controller;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -21,6 +22,7 @@ import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.springframework.http.MediaType;
 import org.springframework.http.converter.json.JacksonJsonHttpMessageConverter;
@@ -29,11 +31,11 @@ import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.MockMultipartHttpServletRequestBuilder;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.web.multipart.MaxUploadSizeExceededException;
+import org.springframework.web.multipart.MultipartFile;
 import ru.projectx.contracts.dto.AttachmentResponse;
 import ru.projectx.contracts.exception.AttachmentConflictException;
 import ru.projectx.contracts.exception.AttachmentDefect;
 import ru.projectx.contracts.exception.AttachmentRejectedException;
-import ru.projectx.contracts.exception.ParticipantNotFoundException;
 import ru.projectx.contracts.exception.RequestCancelledException;
 import ru.projectx.contracts.exception.RequestNotFoundException;
 import ru.projectx.contracts.exception.StorageUnavailableException;
@@ -92,8 +94,8 @@ class AttachmentControllerTest {
         assertThat(upload.individualRequestId()).isEqualTo(REQUEST);
         assertThat(upload.participantId()).isEqualTo(PARTICIPANT);
         assertThat(upload.attachmentId()).isEqualTo(ATTACHMENT);
-        assertThat(upload.contentType()).isEqualTo("image/png");
-        assertThat(upload.size()).isEqualTo(CONTENT.length);
+        assertThat(upload.file().contentType()).isEqualTo("image/png");
+        assertThat(upload.file().size()).isEqualTo(CONTENT.length);
         assertThat(readAll(upload)).isEqualTo(CONTENT);
     }
 
@@ -113,22 +115,78 @@ class AttachmentControllerTest {
                 .andExpect(jsonPath("$.error.details[0].reason").value(reason))
                 .andExpect(jsonPath("$.error.request_id").value(TRACE));
         verifyNoInteractions(uploads);
+        assertThat(meters.find("contracts.attachments.rejected").counter()).isNull();
     }
 
     @Test
-    void missingAttachmentId_isValidationErrorNamingThePart() throws Exception {
+    void missingOrBlankAttachmentId_isValidationErrorNamingThePartWithoutRejectionMetric() throws Exception {
         mvc.perform(multipart(PATH, REQUEST, PARTICIPANT).file(file("image/jpeg")).header(RequestIds.HEADER, TRACE))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.error.details[0].field").value("attachment_id"))
                 .andExpect(jsonPath("$.error.details[0].reason").value("обязательное поле не передано"));
+
+        mvc.perform(upload(REQUEST.toString(), PARTICIPANT.toString(), "", file("image/jpeg")))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.details[0].field").value("attachment_id"));
+
+        assertThat(meters.find("contracts.attachments.rejected").counter()).isNull();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"id.txt", ""})
+    void attachmentIdSentAsFilePartWithFilename_isValidationErrorWithoutRejectionMetric(String filename)
+            throws Exception {
+        MockMultipartFile attachmentPart = new MockMultipartFile("attachment_id", filename, MediaType.TEXT_PLAIN_VALUE,
+                ATTACHMENT.toString().getBytes(StandardCharsets.UTF_8));
+
+        mvc.perform(multipart(PATH, REQUEST, PARTICIPANT).file(attachmentPart).file(file("image/jpeg"))
+                        .header(RequestIds.HEADER, TRACE))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("VALIDATION_ERROR"))
+                .andExpect(jsonPath("$.error.details.length()").value(1))
+                .andExpect(jsonPath("$.error.details[0].field").value("attachment_id"))
+                .andExpect(jsonPath("$.error.details[0].reason").value("неверный формат"))
+                .andExpect(jsonPath("$.error.request_id").value(TRACE));
+        verifyNoInteractions(uploads);
+        assertThat(meters.find("contracts.attachments.rejected").counter()).isNull();
     }
 
     @Test
-    void missingFile_isValidationErrorNamingThePart() throws Exception {
+    void missingFileOrFileWithoutFilename_isValidationErrorNamingThePartWithoutRejectionMetric() throws Exception {
         mvc.perform(multipart(PATH, REQUEST, PARTICIPANT).param("attachment_id", ATTACHMENT.toString()))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.error.details[0].field").value("file"))
                 .andExpect(jsonPath("$.error.details[0].reason").value("обязательное поле не передано"));
+
+        mvc.perform(multipart(PATH, REQUEST, PARTICIPANT).param("attachment_id", ATTACHMENT.toString())
+                        .param("file", "plain-text"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.details[0].field").value("file"));
+
+        assertThat(meters.find("contracts.attachments.rejected").counter()).isNull();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", "   "})
+    void fileWithBlankFilename_isValidationErrorWithoutRejectionMetric(String filename) throws Exception {
+        MockMultipartFile nameless = new MockMultipartFile("file", filename, "image/jpeg", CONTENT);
+
+        mvc.perform(upload(REQUEST.toString(), PARTICIPANT.toString(), ATTACHMENT.toString(), nameless))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("VALIDATION_ERROR"))
+                .andExpect(jsonPath("$.error.details.length()").value(1))
+                .andExpect(jsonPath("$.error.details[0].field").value("file"))
+                .andExpect(jsonPath("$.error.details[0].reason").value("неверный формат"));
+        verifyNoInteractions(uploads);
+        assertThat(meters.find("contracts.attachments.rejected").counter()).isNull();
+    }
+
+    @Test
+    void multipartParts_rejectsNullOriginalFilename() {
+        MultipartFile file = mock(MultipartFile.class);
+        when(file.getOriginalFilename()).thenReturn(null);
+
+        assertThatThrownBy(() -> MultipartParts.requireFile(file)).isInstanceOf(MissingFileNameException.class);
     }
 
     @Test
@@ -163,20 +221,14 @@ class AttachmentControllerTest {
     }
 
     @Test
-    void unknownParticipant_isNotFound() throws Exception {
-        expectError(new ParticipantNotFoundException(REQUEST, PARTICIPANT), 404, "PARTICIPANT_NOT_FOUND",
-                "участника нет в составе заявки");
-    }
-
-    @Test
     void cancelledRequest_isInvalidState() throws Exception {
         expectError(new RequestCancelledException(REQUEST), 409, "INVALID_STATE", "работа по заявке прекращена");
     }
 
     @Test
-    void conflictingAttachment_isAttachmentConflict() throws Exception {
+    void conflictingAttachment_isAttachmentConflictWithNeutralMessage() throws Exception {
         expectError(new AttachmentConflictException(ATTACHMENT), 409, "ATTACHMENT_CONFLICT",
-                "вложение уже принято с другим содержимым или по другому участнику");
+                "вложение с таким идентификатором уже зарегистрировано с другими реквизитами или удалено");
     }
 
     @Test
@@ -229,7 +281,7 @@ class AttachmentControllerTest {
     }
 
     private static byte[] readAll(CertificateUpload upload) throws IOException {
-        try (InputStream stream = upload.content().open()) {
+        try (InputStream stream = upload.file().content().open()) {
             return stream.readAllBytes();
         }
     }

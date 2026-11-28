@@ -107,9 +107,19 @@ public class CertificateStorageSteps {
                 .isEqualTo(calls.acceptedContent(attachment));
     }
 
+    @Тогда("содержимое объекта согласия по вложению {string} в хранилище совпадает с отправленным")
+    public void consentObjectContent(String attachment) throws Exception {
+        objectContent(attachment);
+    }
+
     @Тогда("папки объектов справок по вложениям {string} и {string} разные")
     public void separateFolders(String first, String second) {
         assertThat(folder(records.byAttachment(first).key())).isNotEqualTo(folder(records.byAttachment(second).key()));
+    }
+
+    @Тогда("папки объектов согласий по вложениям {string} и {string} разные")
+    public void separateConsentFolders(String first, String second) {
+        separateFolders(first, second);
     }
 
     private String folder(String key) {

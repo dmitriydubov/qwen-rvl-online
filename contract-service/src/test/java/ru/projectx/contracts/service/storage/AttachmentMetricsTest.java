@@ -19,7 +19,7 @@ class AttachmentMetricsTest {
         assertThat(registry.get("contracts.attachments.stored").counter().count()).isEqualTo(2);
         assertThat(registry.get("contracts.attachments.stored").counter().getId().getTags()).isEmpty();
         assertThat(registry.get("contracts.attachments.stored").counter().getId().getDescription())
-                .isEqualTo("справки 070/у, впервые записанные в реестр документов");
+                .isEqualTo("вложения, впервые записанные в реестр документов");
     }
 
     @Test
@@ -34,7 +34,7 @@ class AttachmentMetricsTest {
         assertThat(registry.get("contracts.attachments.rejected").tag("reason", "size").counter().getId().getTags())
                 .hasSize(1);
         assertThat(registry.get("contracts.attachments.rejected").tag("reason", "size").counter().getId()
-                .getDescription()).isEqualTo("файлы справок, отклонённые по типу или размеру");
+                .getDescription()).isEqualTo("файлы вложений, отклонённые по типу или размеру");
     }
 
     @Test
@@ -44,6 +44,6 @@ class AttachmentMetricsTest {
         assertThat(registry.get("contracts.storage.unavailable").counter().count()).isEqualTo(1);
         assertThat(registry.get("contracts.storage.unavailable").counter().getId().getTags()).isEmpty();
         assertThat(registry.get("contracts.storage.unavailable").counter().getId().getDescription())
-                .isEqualTo("обращения к хранилищу S3 за справками, не получившие успешного ответа");
+                .isEqualTo("обращения к хранилищу S3, не получившие успешного ответа");
     }
 }

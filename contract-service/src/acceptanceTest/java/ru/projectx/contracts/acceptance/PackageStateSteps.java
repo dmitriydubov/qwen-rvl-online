@@ -2,7 +2,6 @@ package ru.projectx.contracts.acceptance;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import ch.qos.logback.classic.spi.ILoggingEvent;
 import io.cucumber.java.ru.Когда;
 import io.cucumber.java.ru.Тогда;
 import java.io.IOException;
@@ -57,6 +56,12 @@ public class PackageStateSteps {
         calls.exchange("GET", path(request), Optional.of(requestId), Optional.empty());
     }
 
+    @Когда("сервис Заявок запрашивает состояние пакета по заявке {string} с недопустимым заголовком X-Request-Id {string}")
+    public void requestsPackageWithInvalidRequestId(String request, String kind)
+            throws IOException, InterruptedException {
+        calls.exchange("GET", path(request), Optional.of(AttachmentUploadSteps.invalidRequestId(kind)), Optional.empty());
+    }
+
     @Тогда("Договоры ответили состоянием пакета {int}: заявка {string}, статус {string}, участники:")
     public void answeredPackage(int status, String request, String requestStatus, List<Map<String, String>> rows) {
         AttachmentCalls.Answer answer = calls.last();
@@ -78,11 +83,12 @@ public class PackageStateSteps {
     public void getJournaled(int status) {
         String requestId = calls.last().requestId()
                 .orElseThrow(() -> new AssertionError("в ответе нет заголовка X-Request-Id"));
-        assertThat(journal.events()).as("записи журнала о вызове с requestId %s", requestId)
-                .filteredOn(event -> requestId.equals(event.getMDCPropertyMap().get("requestId")))
-                .extracting(ILoggingEvent::getFormattedMessage)
-                .anyMatch(message -> message.startsWith("синхронный вызов GET ")
-                        && message.endsWith(" завершён с кодом " + status));
+        getJournaledWithRequestId(requestId, status);
+    }
+
+    @Тогда("в журнале Договоров есть запись о вызове GET с requestId {string} и кодом ответа {int}")
+    public void getJournaledWithRequestId(String requestId, int status) {
+        SyncCallLogAssertions.assertLogged(journal, "GET", requestId, status);
     }
 
     @Тогда("значение поля {string} сообщения {string} есть в его теле, но не попало в ответ Договоров о состоянии пакета")

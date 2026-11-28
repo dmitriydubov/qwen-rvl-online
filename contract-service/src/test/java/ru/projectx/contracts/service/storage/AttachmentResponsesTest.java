@@ -9,12 +9,13 @@ import java.time.Instant;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
 import ru.projectx.contracts.dto.AttachmentResponse;
-import ru.projectx.contracts.entity.document.ParticipantAttachment;
-import ru.projectx.contracts.entity.party.PersonOwner;
+import ru.projectx.contracts.dto.ConsentResponse;
+import ru.projectx.contracts.entity.document.DocumentAttachments;
 import ru.projectx.contracts.entity.document.PrintedForm;
 import ru.projectx.contracts.entity.document.PrintedFormType;
 import ru.projectx.contracts.entity.document.StoredFile;
 import ru.projectx.contracts.entity.document.UskDocument;
+import ru.projectx.contracts.entity.party.PersonOwner;
 
 class AttachmentResponsesTest {
 
@@ -22,31 +23,44 @@ class AttachmentResponsesTest {
 
     @Test
     void certificate_isAnsweredWithItsOwnerAndFile() {
-        PrintedForm certificate = PrintedForm.receivedCertificate(
-                new ParticipantAttachment(Uploads.REQUEST, Uploads.PARTICIPANT, Uploads.ATTACHMENT),
+        PrintedForm certificate = PrintedForm.receivedAttachment(PrintedFormType.MEDICAL_CERTIFICATE,
+                DocumentAttachments.certificate(Uploads.REQUEST, Uploads.PARTICIPANT, Uploads.ATTACHMENT),
                 new StoredFile("certificates/f/a.png", Uploads.CONTENT_HASH, 76, "image/png"), NOW);
 
-        assertThat(AttachmentResponses.of(certificate)).isEqualTo(new AttachmentResponse(certificate.id(),
+        assertThat(AttachmentResponses.certificate(certificate)).isEqualTo(new AttachmentResponse(certificate.id(),
                 Uploads.ATTACHMENT, Uploads.REQUEST, Uploads.PARTICIPANT, "image/png", 76, Uploads.CONTENT_HASH, NOW));
     }
 
     @Test
-    void policyForm_isNoCertificate() {
-        PrintedForm form = PrintedForm.issuedFor(PersonOwner.lmPolicy(Uploads.PARTICIPANT),
-                new UskDocument(PrintedFormType.POLICY, "https://s3.example.test/lm.pdf", 1L), NOW);
+    void consent_isAnsweredWithItsPolicyFamilyMemberAndFile() {
+        PrintedForm consent = PrintedForm.receivedAttachment(PrintedFormType.PD_CONSENT,
+                DocumentAttachments.consent(Uploads.POLICY, Uploads.FAMILY_MEMBER, Uploads.ATTACHMENT),
+                new StoredFile("certificates/f/a.pdf", Uploads.CONTENT_HASH, 76, "application/pdf"), NOW);
 
-        assertThatThrownBy(() -> AttachmentResponses.of(form)).isInstanceOf(IllegalStateException.class)
-                .hasMessageEndingWith("не справка участника");
+        assertThat(AttachmentResponses.consent(consent)).isEqualTo(new ConsentResponse(consent.id(),
+                Uploads.ATTACHMENT, Uploads.POLICY, Uploads.FAMILY_MEMBER, "application/pdf", 76, Uploads.CONTENT_HASH,
+                NOW));
     }
 
     @Test
-    void certificateWithoutFile_isNotAnswered() {
+    void policyForm_isNoAttachment() {
+        PrintedForm form = PrintedForm.issuedFor(PersonOwner.lmPolicy(Uploads.PARTICIPANT),
+                new UskDocument(PrintedFormType.POLICY, "https://s3.example.test/lm.pdf", 1L), NOW);
+
+        assertThatThrownBy(() -> AttachmentResponses.certificate(form)).isInstanceOf(IllegalStateException.class)
+                .hasMessageEndingWith("не вложение");
+        assertThatThrownBy(() -> AttachmentResponses.consent(form)).isInstanceOf(IllegalStateException.class)
+                .hasMessageEndingWith("не вложение");
+    }
+
+    @Test
+    void attachmentWithoutFile_isNotAnswered() {
         PrintedForm certificate = mock();
         given(certificate.attachment()).willReturn(Optional.of(
-                new ParticipantAttachment(Uploads.REQUEST, Uploads.PARTICIPANT, Uploads.ATTACHMENT)));
+                DocumentAttachments.certificate(Uploads.REQUEST, Uploads.PARTICIPANT, Uploads.ATTACHMENT)));
         given(certificate.storedFile()).willReturn(Optional.empty());
 
-        assertThatThrownBy(() -> AttachmentResponses.of(certificate)).isInstanceOf(IllegalStateException.class)
+        assertThatThrownBy(() -> AttachmentResponses.certificate(certificate)).isInstanceOf(IllegalStateException.class)
                 .hasMessageEndingWith("нет файла");
     }
 }

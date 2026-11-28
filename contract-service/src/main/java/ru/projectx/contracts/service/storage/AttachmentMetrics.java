@@ -22,14 +22,14 @@ public class AttachmentMetrics {
 
     public void countStored() {
         Counter.builder(STORED)
-                .description("справки 070/у, впервые записанные в реестр документов")
+                .description("вложения, впервые записанные в реестр документов")
                 .register(registry)
                 .increment();
     }
 
     public void countRejected(AttachmentDefect defect) {
         Counter.builder(REJECTED)
-                .description("файлы справок, отклонённые по типу или размеру")
+                .description("файлы вложений, отклонённые по типу или размеру")
                 .tag(REASON, defect.name().toLowerCase(Locale.ROOT))
                 .register(registry)
                 .increment();
@@ -37,7 +37,7 @@ public class AttachmentMetrics {
 
     public void countStorageUnavailable() {
         Counter.builder(STORAGE_UNAVAILABLE)
-                .description("обращения к хранилищу S3 за справками, не получившие успешного ответа")
+                .description("обращения к хранилищу S3, не получившие успешного ответа")
                 .register(registry)
                 .increment();
     }

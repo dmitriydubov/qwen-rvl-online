@@ -21,7 +21,7 @@ class ContentDigestsTest {
 
     @Test
     void sha256_ofTheStandCertificate_matchesTheSpecification() {
-        assertThat(ContentDigests.sha256(Uploads.jpeg().content())).isEqualTo(Uploads.CONTENT_HASH);
+        assertThat(ContentDigests.sha256(Uploads.jpeg().file().content())).isEqualTo(Uploads.CONTENT_HASH);
     }
 
     @Test

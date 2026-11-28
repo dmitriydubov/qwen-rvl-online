@@ -27,3 +27,5 @@ databaseChangeLog:
       file: db/changelog/013-payment-orders.yaml
   - include:
       file: db/changelog/014-payment-invoices.yaml
+  - include:
+      file: db/changelog/015-attachments.yaml

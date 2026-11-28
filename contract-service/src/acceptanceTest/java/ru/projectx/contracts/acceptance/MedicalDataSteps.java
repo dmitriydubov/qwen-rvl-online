@@ -40,6 +40,11 @@ public class MedicalDataSteps {
         }
     }
 
+    @Тогда("имя файла {string} и содержимое согласия по вложению {string} не попали ни в журнал Договоров, ни в метрики, ни в ответ")
+    public void consentDataStaysOut(String fileName, String attachment) throws IOException, InterruptedException {
+        medicalDataStaysOut(fileName, attachment);
+    }
+
     private String exposition() throws IOException, InterruptedException {
         HttpRequest request = HttpRequest.newBuilder(metrics).timeout(TIMEOUT).GET().build();
         HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));

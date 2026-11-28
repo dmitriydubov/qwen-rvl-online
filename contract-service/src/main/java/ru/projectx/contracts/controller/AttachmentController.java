@@ -28,6 +28,6 @@ public class AttachmentController {
             @RequestParam("attachment_id") UUID attachmentId,
             @RequestPart("file") MultipartFile file) {
         return uploads.receive(new CertificateUpload(individualRequestId, participantId, attachmentId,
-                file.getContentType(), file.getSize(), file::getInputStream));
+                MultipartParts.requireFile(file)));
     }
 }

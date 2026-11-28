@@ -20,11 +20,11 @@ public class AttachmentFiles {
         this.metrics = metrics;
     }
 
-    public AcceptedFile accept(CertificateUpload upload) {
-        String type = Optional.ofNullable(upload.contentType()).map(AttachmentFiles::mediaType)
+    public AcceptedFile accept(UploadFile file) {
+        String type = Optional.ofNullable(file.contentType()).map(AttachmentFiles::mediaType)
                 .filter(settings.contentTypes()::containsKey)
                 .orElseThrow(() -> rejected(AttachmentDefect.CONTENT_TYPE));
-        if (upload.size() < 1 || upload.size() > settings.maxFileSize().toBytes()) {
+        if (file.size() < 1 || file.size() > settings.maxFileSize().toBytes()) {
             throw rejected(AttachmentDefect.SIZE);
         }
         return new AcceptedFile(type, settings.contentTypes().get(type));

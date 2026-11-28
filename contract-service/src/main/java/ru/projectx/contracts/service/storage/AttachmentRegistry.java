@@ -2,18 +2,14 @@ package ru.projectx.contracts.service.storage;
 
 import java.time.Clock;
 import java.util.Optional;
+import java.util.UUID;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
-import ru.projectx.contracts.dto.AttachmentResponse;
-import ru.projectx.contracts.entity.issuance.IssuanceRequest;
-import ru.projectx.contracts.entity.document.ParticipantAttachment;
+import ru.projectx.contracts.entity.document.DocumentAttachments;
 import ru.projectx.contracts.entity.document.PrintedForm;
-import ru.projectx.contracts.entity.issuance.RequestParticipant;
 import ru.projectx.contracts.entity.document.StoredFile;
 import ru.projectx.contracts.exception.AttachmentConflictException;
-import ru.projectx.contracts.exception.ParticipantNotFoundException;
-import ru.projectx.contracts.exception.RequestCancelledException;
-import ru.projectx.contracts.exception.RequestNotFoundException;
+import ru.projectx.contracts.exception.AttachmentNotFoundException;
 import ru.projectx.contracts.repository.issuance.IssuanceRequestRepository;
 import ru.projectx.contracts.repository.issuance.PrintedFormRepository;
 
@@ -31,41 +27,42 @@ public class AttachmentRegistry {
     }
 
     @Transactional(readOnly = true)
-    public Optional<AttachmentResponse> accepted(CertificateUpload upload, String fileHash) {
-        ensureOpenFor(upload);
-        return documents.findByAttachmentAttachmentId(upload.attachmentId())
-                .map(certificate -> sameUpload(certificate, upload, fileHash));
+    public <R> Optional<R> accepted(AttachmentTarget<R> target, String fileHash) {
+        target.checkOpen(requests);
+        return documents.findByAttachmentAttachmentId(target.attachmentId())
+                .map(existing -> sameUpload(existing, target, fileHash));
+    }
+
+    @Transactional(readOnly = true)
+    public StoredFile activeFile(UUID attachmentId) {
+        PrintedForm document = documents.findByAttachmentAttachmentId(attachmentId)
+                .filter(existing -> existing.attachment().filter(DocumentAttachments::hasActiveAttachmentId).isPresent())
+                .orElseThrow(() -> new AttachmentNotFoundException(attachmentId));
+        return document.storedFile().orElseThrow(
+                () -> new IllegalStateException("у вложения " + document.id() + " нет файла"));
     }
 
     @Transactional
-    public AttachmentResponse register(CertificateUpload upload, StoredFile file) {
-        ensureOpenFor(upload);
-        PrintedForm certificate = PrintedForm.receivedCertificate(owner(upload), file, clock.instant());
-        return AttachmentResponses.of(documents.saveAndFlush(certificate));
+    public <R> R register(AttachmentTarget<R> target, StoredFile file) {
+        target.checkOpen(requests);
+        PrintedForm attachment = PrintedForm.receivedAttachment(target.docType(), target.owner(), file,
+                clock.instant());
+        return target.response(documents.saveAndFlush(attachment));
     }
 
-    private void ensureOpenFor(CertificateUpload upload) {
-        IssuanceRequest request = requests.findById(upload.individualRequestId())
-                .orElseThrow(() -> new RequestNotFoundException(upload.individualRequestId()));
-        if (request.participants().stream().map(RequestParticipant::participantId)
-                .noneMatch(upload.participantId()::equals)) {
-            throw new ParticipantNotFoundException(upload.individualRequestId(), upload.participantId());
+    private static <R> R sameUpload(PrintedForm existing, AttachmentTarget<R> target, String fileHash) {
+        if (!matchesOwner(existing, target) || !matchesContent(existing, fileHash)) {
+            throw new AttachmentConflictException(target.attachmentId());
         }
-        if (request.cancelled()) {
-            throw new RequestCancelledException(upload.individualRequestId());
-        }
+        return target.response(existing);
     }
 
-    private static AttachmentResponse sameUpload(PrintedForm certificate, CertificateUpload upload, String fileHash) {
-        boolean sameOwner = certificate.attachment().filter(owner(upload)::equals).isPresent();
-        boolean sameContent = certificate.storedFile().map(StoredFile::hash).filter(fileHash::equals).isPresent();
-        if (!sameOwner || !sameContent) {
-            throw new AttachmentConflictException(upload.attachmentId());
-        }
-        return AttachmentResponses.of(certificate);
+    private static boolean matchesOwner(PrintedForm existing, AttachmentTarget<?> target) {
+        return existing.docType() == target.docType()
+                && existing.attachment().filter(target.owner()::equals).isPresent();
     }
 
-    private static ParticipantAttachment owner(CertificateUpload upload) {
-        return new ParticipantAttachment(upload.individualRequestId(), upload.participantId(), upload.attachmentId());
+    private static boolean matchesContent(PrintedForm existing, String fileHash) {
+        return existing.storedFile().map(StoredFile::hash).filter(fileHash::equals).isPresent();
     }
 }

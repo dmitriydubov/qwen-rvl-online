@@ -19,8 +19,10 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.InOrder;
 import ru.projectx.contracts.entity.contract.Contract;
-import ru.projectx.contracts.entity.document.ParticipantAttachment;
+import ru.projectx.contracts.entity.document.DocumentAttachment;
+import ru.projectx.contracts.entity.document.DocumentAttachments;
 import ru.projectx.contracts.entity.document.PrintedForm;
+import ru.projectx.contracts.entity.document.PrintedFormType;
 import ru.projectx.contracts.entity.document.StoredFile;
 import ru.projectx.contracts.exception.CertificateKeyMissingException;
 import ru.projectx.contracts.exception.CertificateMissingException;
@@ -50,8 +52,9 @@ class KmContractCertificatesTest {
 
     @BeforeEach
     void insuredHasTwoCertificates() {
-        given(forms.findByAttachmentIndividualRequestIdAndAttachmentParticipantIdOrderByCreatedAtAscIdAsc(Tasks.REQUEST,
-                Tasks.SPOUSE)).willReturn(List.of(certificate(JPEG), certificate(PDF)));
+        given(forms.findByAttachmentIndividualRequestIdAndAttachmentParticipantIdAndDocTypeAndAttachmentDeletedAtIsNullOrderByCreatedAtAscIdAsc(
+                Tasks.REQUEST, Tasks.SPOUSE, PrintedFormType.MEDICAL_CERTIFICATE))
+                .willReturn(List.of(certificate(JPEG), certificate(PDF)));
     }
 
     @Test
@@ -66,12 +69,31 @@ class KmContractCertificatesTest {
 
     @Test
     void contractWithoutCertificates_meetsThePrerequisitesWithoutAskingTheStorage() {
-        given(forms.findByAttachmentIndividualRequestIdAndAttachmentParticipantIdOrderByCreatedAtAscIdAsc(Tasks.REQUEST,
-                Tasks.SPOUSE)).willReturn(List.of());
+        given(forms.findByAttachmentIndividualRequestIdAndAttachmentParticipantIdAndDocTypeAndAttachmentDeletedAtIsNullOrderByCreatedAtAscIdAsc(
+                Tasks.REQUEST, Tasks.SPOUSE, PrintedFormType.MEDICAL_CERTIFICATE)).willReturn(List.of());
 
         assertThat(certificates.check(contract)).isEqualTo(new Prerequisites.Met());
 
         verifyNoInteractions(store);
+    }
+
+    @Test
+    void deletedCertificatesAndConsents_areExcludedByInsuredCertificates() {
+        PrintedForm deleted = PrintedForm.receivedAttachment(PrintedFormType.MEDICAL_CERTIFICATE,
+                new DocumentAttachment(Tasks.REQUEST, Tasks.SPOUSE, null, null, UUID.randomUUID(), NOW, "req-1"),
+                JPEG, NOW);
+        PrintedForm consent = PrintedForm.receivedAttachment(PrintedFormType.PD_CONSENT,
+                DocumentAttachments.consent(UUID.randomUUID(), Tasks.SPOUSE, UUID.randomUUID()), PDF, NOW);
+        PrintedForm active = certificate(PDF);
+        given(forms.findByAttachmentIndividualRequestIdAndAttachmentParticipantIdAndDocTypeAndAttachmentDeletedAtIsNullOrderByCreatedAtAscIdAsc(
+                Tasks.REQUEST, Tasks.SPOUSE, PrintedFormType.MEDICAL_CERTIFICATE))
+                .willReturn(List.of(deleted, consent, active));
+
+        List<SubmittedCertificate> selected = new InsuredCertificates(forms).of(contract);
+
+        assertThat(selected).singleElement()
+                .returns(PrintedFormType.MEDICAL_CERTIFICATE, SubmittedCertificate::docType)
+                .returns(PDF, SubmittedCertificate::file);
     }
 
     @Test
@@ -101,9 +123,12 @@ class KmContractCertificatesTest {
     @Test
     void certificateRecordWithoutAnObject_breaksThePrerequisitesAsAnInternalFailureWithoutAskingTheStorage() {
         PrintedForm withoutObject = mock();
+        given(withoutObject.docType()).willReturn(PrintedFormType.MEDICAL_CERTIFICATE);
+        given(withoutObject.attachment()).willReturn(Optional.of(
+                DocumentAttachments.certificate(Tasks.REQUEST, Tasks.SPOUSE, UUID.randomUUID())));
         given(withoutObject.storedFile()).willReturn(Optional.empty());
-        given(forms.findByAttachmentIndividualRequestIdAndAttachmentParticipantIdOrderByCreatedAtAscIdAsc(Tasks.REQUEST,
-                Tasks.SPOUSE)).willReturn(List.of(withoutObject));
+        given(forms.findByAttachmentIndividualRequestIdAndAttachmentParticipantIdAndDocTypeAndAttachmentDeletedAtIsNullOrderByCreatedAtAscIdAsc(
+                Tasks.REQUEST, Tasks.SPOUSE, PrintedFormType.MEDICAL_CERTIFICATE)).willReturn(List.of(withoutObject));
 
         assertThat(certificates.check(contract)).isInstanceOfSatisfying(Prerequisites.Broken.class, broken -> {
             assertThat(broken.reason())
@@ -123,7 +148,7 @@ class KmContractCertificatesTest {
     }
 
     private static PrintedForm certificate(StoredFile file) {
-        return PrintedForm.receivedCertificate(new ParticipantAttachment(Tasks.REQUEST, Tasks.SPOUSE, UUID.randomUUID()),
-                file, NOW);
+        return PrintedForm.receivedAttachment(PrintedFormType.MEDICAL_CERTIFICATE,
+                DocumentAttachments.certificate(Tasks.REQUEST, Tasks.SPOUSE, UUID.randomUUID()), file, NOW);
     }
 }
